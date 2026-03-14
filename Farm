@@ -1,161 +1,3 @@
--- 🔐 WHITELIST DE USER IDS
--- Ajoute simplement les UserIds ici
-local Whitelist = {
-	[1] = true, -- Exemple joueur 1
-	[2] = true, -- Exemple joueur 2
-	-- Ajoute autant de joueurs que tu veux
-}
-
--- 🔍 Vérification des joueurs
-game.Players.PlayerAdded:Connect(function(player)
-	if not Whitelist[player.UserId] then
-		player:Kick("This is a private script, You're not allowed in. Ask the owner for a whitelist.")
-	end
-end)
---==============AUTOJUMP===============--
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-
-local player = Players.LocalPlayer
-
--- PARAMÈTRES
-local RAY_DISTANCE = 4
-local RAY_HEIGHT_OFFSET = -1
-local JUMP_COOLDOWN = 0.5
-
-local humanoid
-local rootPart
-local lastJump = 0
-
-local rayParams = RaycastParams.new()
-rayParams.FilterType = Enum.RaycastFilterType.Blacklist
-
--- Setup à chaque respawn
-local function setupCharacter(character)
-	humanoid = character:WaitForChild("Humanoid")
-	rootPart = character:WaitForChild("HumanoidRootPart")
-	rayParams.FilterDescendantsInstances = { character }
-	lastJump = 0
-end
-
--- Initial + respawn
-if player.Character then
-	setupCharacter(player.Character)
-end
-player.CharacterAdded:Connect(setupCharacter)
-
-RunService.RenderStepped:Connect(function()
-	if not humanoid or not rootPart then return end
-
-	-- ❌ pas d'auto-jump en grimpant
-	if humanoid:GetState() == Enum.HumanoidStateType.Climbing then return end
-	if tick() - lastJump < JUMP_COOLDOWN then return end
-	if humanoid.FloorMaterial == Enum.Material.Air then return end
-
-	local rayOrigin = rootPart.Position + Vector3.new(0, RAY_HEIGHT_OFFSET, 0)
-	local rayDirection = rootPart.CFrame.LookVector * RAY_DISTANCE
-
-	local result = workspace:Raycast(rayOrigin, rayDirection, rayParams)
-
-	if result and result.Instance and result.Instance.CanCollide then
-		humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-		lastJump = tick()
-	end
-end)
-
-
---=========AUTO WALK IF IDLE============--
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-
-local player = Players.LocalPlayer
-
- --PARAMÈTRES
-local IDLE_TIME = 5
-local MOVE_DISTANCE = 10
-local WALL_DETECTION_DISTANCE = 3
-local POSITION_EPSILON = 0.15
-
-local humanoid
-local rootPart
-local lastPosition
-local idleTimer = 0
-local isAutoMoving = false
-
-local rayParams = RaycastParams.new()
-rayParams.FilterType = Enum.RaycastFilterType.Blacklist
-
- --Direction aléatoire
-local function getRandomDirection()
-	local angle = math.random() * math.pi * 2
-	return Vector3.new(math.cos(angle), 0, math.sin(angle))
-end
-
--- Mur devant ?
-local function isWallAhead(direction)
-	local result = workspace:Raycast(
-		rootPart.Position,
-		direction.Unit * WALL_DETECTION_DISTANCE,
-		rayParams
-	)
-	return result and result.Instance and result.Instance.CanCollide
-end
-
--- Setup à chaque respawn
-local function setupCharacter(character)
-	humanoid = character:WaitForChild("Humanoid")
-	rootPart = character:WaitForChild("HumanoidRootPart")
-	lastPosition = rootPart.Position
-	idleTimer = 0
-	isAutoMoving = false
-	rayParams.FilterDescendantsInstances = { character }
-end
-
-if player.Character then
-	setupCharacter(player.Character)
-end
-player.CharacterAdded:Connect(setupCharacter)
-
-RunService.Heartbeat:Connect(function(dt)
-	if not humanoid or not rootPart then return end
-
-	-- Détection mouvement
-	if (rootPart.Position - lastPosition).Magnitude > POSITION_EPSILON then
-		idleTimer = 0
-		isAutoMoving = false
-	else
-		idleTimer += dt
-	end
-
-	lastPosition = rootPart.Position
-
-	-- AFK détecté
-	if idleTimer >= IDLE_TIME and not isAutoMoving then
-		isAutoMoving = true
-		idleTimer = 0
-
-		task.spawn(function()
-			local direction = getRandomDirection()
-
-			for i = 1, 8 do
-				if not isWallAhead(direction) then break end
-				direction = getRandomDirection()
-			end
-
-			humanoid:MoveTo(rootPart.Position + direction.Unit * MOVE_DISTANCE)
-			humanoid.MoveToFinished:Wait()
-			isAutoMoving = false
-		end)
-	end
-end)
-
-
-
-
-
-
-
-
 --!strict
 -- ================= SERVICES =================
 local Players = game:GetService("Players")
@@ -167,52 +9,56 @@ local UserInputService = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 
 -- ================= SETTINGS =================
+local scriptEnabled = true
 local autoFarm = false
 local moveMode = "Pathfinding" -- Pathfinding | Walk | Tween
 local tweenSpeed = 20
 local postCollectDelay = 0.2
 local tpIfStuck = false
-local DROP_HEIGHT_ALLOW = 6      -- hauteur mini pour accepter une chute
-local DROP_CHECK_DISTANCE = 6    -- distance avant le bord
+local autoJumpEnabled = false
+local autoWalkIfIdleEnabled = false
 
+local DROP_HEIGHT_ALLOW = 6
+local DROP_CHECK_DISTANCE = 6
 local blacklistDuration = 6
 
--- path safety
 local MAX_PATH_DISTANCE = 300
 local LOBBY_IGNORE_DISTANCE = 500
-
--- anti stuck
 local MAX_TARGET_TIME = 6
 local STUCK_DISTANCE = 1.5
 local STUCK_TIME = 1.2
 
-local function shouldForceDrop(targetPos: Vector3): boolean
-	if not rootPart then return false end
+-- Auto jump settings
+local RAY_DISTANCE = 4
+local RAY_HEIGHT_OFFSET = -1
+local JUMP_COOLDOWN = 0.5
+local lastJump = 0
 
-	local heightDiff = rootPart.Position.Y - targetPos.Y
-	if heightDiff < DROP_HEIGHT_ALLOW then
-		return false
-	end
+-- Auto walk if idle settings
+local IDLE_TIME = 5
+local MOVE_DISTANCE = 10
+local WALL_DETECTION_DISTANCE = 3
+local POSITION_EPSILON = 0.15
 
-	-- ray devant → vide ?
-	local rayParams = RaycastParams.new()
-	rayParams.FilterDescendantsInstances = { player.Character }
-	rayParams.FilterType = Enum.RaycastFilterType.Blacklist
-
-	local origin = rootPart.Position
-	local dir = rootPart.CFrame.LookVector * DROP_CHECK_DISTANCE
-
-	local result = workspace:Raycast(origin, dir, rayParams)
-	return result == nil
-end
+local listRefreshInterval = 1
 
 -- ================= CHARACTER =================
 local humanoid: Humanoid?
 local rootPart: BasePart?
+local deathCount = 0
+local characterDiedConnection: RBXScriptConnection?
 
 local function bindCharacter(char: Model)
 	humanoid = char:WaitForChild("Humanoid") :: Humanoid
 	rootPart = char:WaitForChild("HumanoidRootPart") :: BasePart
+	lastJump = 0
+
+	if characterDiedConnection then
+		characterDiedConnection:Disconnect()
+	end
+	characterDiedConnection = humanoid.Died:Connect(function()
+		deathCount += 1
+	end)
 end
 
 if player.Character then
@@ -224,13 +70,30 @@ player.CharacterAdded:Connect(function(char)
 	bindCharacter(char)
 end)
 
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+local function updateRaycastFilter()
+	if player.Character then
+		rayParams.FilterDescendantsInstances = { player.Character }
+	end
+end
+
+updateRaycastFilter()
+player.CharacterAdded:Connect(function()
+	task.wait(0.2)
+	updateRaycastFilter()
+end)
+
 -- ================= COINS =================
-local cachedCoins: {Instance} = {}
-local coinBlacklist: {[Instance]: number} = {}
+local cachedCoins: { Instance } = {}
+local coinBlacklist: { [Instance]: number } = {}
 
 local function isBlacklisted(coin: Instance): boolean
 	local t = coinBlacklist[coin]
-	if not t then return false end
+	if not t then
+		return false
+	end
 	if os.clock() > t then
 		coinBlacklist[coin] = nil
 		return false
@@ -255,7 +118,9 @@ local function refreshCoins()
 end
 
 local function getNearestCoin(): Instance?
-	if not rootPart then return nil end
+	if not rootPart then
+		return nil
+	end
 	local best, bestDist = nil, math.huge
 
 	for _, coin in ipairs(cachedCoins) do
@@ -300,17 +165,40 @@ local function computePath(from: Vector3, to: Vector3): Path?
 	return path
 end
 
+local function shouldForceDrop(targetPos: Vector3): boolean
+	if not rootPart then
+		return false
+	end
+
+	local heightDiff = rootPart.Position.Y - targetPos.Y
+	if heightDiff < DROP_HEIGHT_ALLOW then
+		return false
+	end
+
+	local localRay = RaycastParams.new()
+	localRay.FilterDescendantsInstances = { player.Character }
+	localRay.FilterType = Enum.RaycastFilterType.Blacklist
+
+	local origin = rootPart.Position
+	local dir = rootPart.CFrame.LookVector * DROP_CHECK_DISTANCE
+	local result = workspace:Raycast(origin, dir, localRay)
+	return result == nil
+end
+
 -- ================= MOVEMENT =================
 local activeTween: Tween?
 
 local function safeMoveTo(pos: Vector3, timeout: number): boolean
-	if not humanoid or not rootPart then return false end
+	if not humanoid or not rootPart then
+		return false
+	end
 
 	humanoid:MoveTo(pos)
 	local start = os.clock()
-
 	while os.clock() - start < timeout do
-		if not autoFarm then return false end
+		if not scriptEnabled or not autoFarm then
+			return false
+		end
 		if (rootPart.Position - pos).Magnitude < 4 then
 			return true
 		end
@@ -320,18 +208,17 @@ local function safeMoveTo(pos: Vector3, timeout: number): boolean
 end
 
 local function moveTo(target: Vector3, path: Path?): boolean
-	if not humanoid or not rootPart then return false end
+	if not humanoid or not rootPart then
+		return false
+	end
 
 	if moveMode == "Tween" then
-		if activeTween then activeTween:Cancel() end
+		if activeTween then
+			activeTween:Cancel()
+		end
 		local dist = (rootPart.Position - target).Magnitude
-		local time = math.max(dist / tweenSpeed, 0.05)
-
-		activeTween = TweenService:Create(
-			rootPart,
-			TweenInfo.new(time, Enum.EasingStyle.Linear),
-			{CFrame = CFrame.new(target)}
-		)
+		local travelTime = math.max(dist / tweenSpeed, 0.05)
+		activeTween = TweenService:Create(rootPart, TweenInfo.new(travelTime, Enum.EasingStyle.Linear), { CFrame = CFrame.new(target) })
 		activeTween:Play()
 		activeTween.Completed:Wait()
 		return true
@@ -343,17 +230,18 @@ local function moveTo(target: Vector3, path: Path?): boolean
 
 	if moveMode == "Pathfinding" and path then
 		local waypoints = path:GetWaypoints()
-
 		for i, wp in ipairs(waypoints) do
-			if not autoFarm then return false end
+			if not scriptEnabled or not autoFarm then
+				return false
+			end
 
 			local targetPos = wp.Position
-
-			-- anticipation angle
 			if i < #waypoints then
 				local nextPos = waypoints[i + 1].Position
-				local dir = (nextPos - targetPos).Unit
-				targetPos += dir * 1.5
+				local delta = nextPos - targetPos
+				if delta.Magnitude > 0 then
+					targetPos += delta.Unit * 1.5
+				end
 			end
 
 			if wp.Action == Enum.PathWaypointAction.Jump then
@@ -364,21 +252,115 @@ local function moveTo(target: Vector3, path: Path?): boolean
 				return false
 			end
 		end
-
 		return true
 	end
 
 	return false
 end
 
+-- ================= AUTO JUMP LOOP =================
+RunService.RenderStepped:Connect(function()
+	if not scriptEnabled or not autoJumpEnabled then
+		return
+	end
+	if not humanoid or not rootPart then
+		return
+	end
+
+	if humanoid:GetState() == Enum.HumanoidStateType.Climbing then
+		return
+	end
+	if tick() - lastJump < JUMP_COOLDOWN then
+		return
+	end
+	if humanoid.FloorMaterial == Enum.Material.Air then
+		return
+	end
+
+	local rayOrigin = rootPart.Position + Vector3.new(0, RAY_HEIGHT_OFFSET, 0)
+	local rayDirection = rootPart.CFrame.LookVector * RAY_DISTANCE
+	local result = workspace:Raycast(rayOrigin, rayDirection, rayParams)
+
+	if result and result.Instance and result.Instance.CanCollide then
+		humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		lastJump = tick()
+	end
+end)
+
+-- ================= AUTO WALK IF IDLE LOOP =================
+local idleTimer = 0
+local isAutoMoving = false
+local lastPosition: Vector3? = nil
+
+local function getRandomDirection()
+	local angle = math.random() * math.pi * 2
+	return Vector3.new(math.cos(angle), 0, math.sin(angle))
+end
+
+local function isWallAhead(direction: Vector3): boolean
+	if not rootPart then
+		return false
+	end
+	local result = workspace:Raycast(rootPart.Position, direction.Unit * WALL_DETECTION_DISTANCE, rayParams)
+	return result ~= nil and result.Instance ~= nil and result.Instance.CanCollide
+end
+
+RunService.Heartbeat:Connect(function(dt)
+	if not scriptEnabled or not autoWalkIfIdleEnabled then
+		idleTimer = 0
+		isAutoMoving = false
+		if rootPart then
+			lastPosition = rootPart.Position
+		end
+		return
+	end
+	if not humanoid or not rootPart then
+		return
+	end
+
+	if not lastPosition then
+		lastPosition = rootPart.Position
+	end
+
+	if (rootPart.Position - lastPosition).Magnitude > POSITION_EPSILON then
+		idleTimer = 0
+		isAutoMoving = false
+	else
+		idleTimer += dt
+	end
+	lastPosition = rootPart.Position
+
+	if idleTimer >= IDLE_TIME and not isAutoMoving then
+		isAutoMoving = true
+		idleTimer = 0
+		task.spawn(function()
+			if not humanoid or not rootPart then
+				isAutoMoving = false
+				return
+			end
+			local direction = getRandomDirection()
+			for _ = 1, 8 do
+				if not isWallAhead(direction) then
+					break
+				end
+				direction = getRandomDirection()
+			end
+
+			humanoid:MoveTo(rootPart.Position + direction.Unit * MOVE_DISTANCE)
+			humanoid.MoveToFinished:Wait()
+			isAutoMoving = false
+		end)
+	end
+end)
+
 -- ================= FARM LOOP =================
 task.spawn(function()
 	local lockedTarget: Instance?
 	local targetStart = 0
-	local lastPos: Vector3?
+	local localLastPos: Vector3?
 	local lastMove = 0
 
-	while true do
+	while scriptEnabled do
 		task.wait(0.05)
 
 		local ok, err = pcall(function()
@@ -391,14 +373,18 @@ task.spawn(function()
 
 			if not lockedTarget or isBlacklisted(lockedTarget) then
 				lockedTarget = getNearestCoin()
-				if not lockedTarget then return end
+				if not lockedTarget then
+					return
+				end
 				targetStart = os.clock()
-				lastPos = rootPart.Position
+				localLastPos = rootPart.Position
 				lastMove = os.clock()
 			end
 
 			local coin = lockedTarget
-			if not coin then return end
+			if not coin then
+				return
+			end
 
 			if os.clock() - targetStart > MAX_TARGET_TIME then
 				coinBlacklist[coin] = os.clock() + blacklistDuration
@@ -406,8 +392,8 @@ task.spawn(function()
 				return
 			end
 
-			if lastPos and (rootPart.Position - lastPos).Magnitude > STUCK_DISTANCE then
-				lastPos = rootPart.Position
+			if localLastPos and (rootPart.Position - localLastPos).Magnitude > STUCK_DISTANCE then
+				localLastPos = rootPart.Position
 				lastMove = os.clock()
 			elseif os.clock() - lastMove > STUCK_TIME then
 				if tpIfStuck then
@@ -421,19 +407,15 @@ task.spawn(function()
 			local path
 			if moveMode == "Pathfinding" then
 				path = computePath(rootPart.Position, getPos(coin))
-
-				-- fallback chute volontaire
 				if not path and shouldForceDrop(getPos(coin)) then
 					humanoid:MoveTo(getPos(coin))
 					return
 				end
-
 				if not path then
 					coinBlacklist[coin] = os.clock() + 2
 					lockedTarget = nil
 					return
 				end
-
 			end
 
 			moveTo(getPos(coin), path)
@@ -454,132 +436,366 @@ end)
 
 -- ================= GUI =================
 local gui = Instance.new("ScreenGui")
+gui.Name = "AutoCNS_UI"
 gui.ResetOnSpawn = false
 gui.Parent = player:WaitForChild("PlayerGui")
 
-local main = Instance.new("Frame", gui)
-main.Size = UDim2.fromScale(0.35, 0.45)
-main.Position = UDim2.fromScale(0.03, 0.25)
-main.BackgroundColor3 = Color3.fromRGB(25,25,25)
-main.Active = true
-main.Draggable = true
+local main = Instance.new("Frame")
+main.Name = "Main"
+main.Size = UDim2.fromOffset(420, 360)
+main.Position = UDim2.fromScale(0.04, 0.2)
+main.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+main.BorderSizePixel = 0
+main.Parent = gui
 
--- Tabs
-local tabBar = Instance.new("Frame", main)
-tabBar.Size = UDim2.fromScale(1, 0.08)
-tabBar.Position = UDim2.fromScale(0,0)
+local corner = Instance.new("UICorner", main)
+corner.CornerRadius = UDim.new(0, 8)
+
+local topBar = Instance.new("Frame")
+topBar.Name = "TopBar"
+topBar.Size = UDim2.new(1, 0, 0, 34)
+topBar.BackgroundColor3 = Color3.fromRGB(34, 34, 34)
+topBar.BorderSizePixel = 0
+topBar.Parent = main
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -70, 1, 0)
+title.Position = UDim2.fromOffset(10, 0)
+title.Text = "AutoCNS"
+title.TextColor3 = Color3.fromRGB(245, 245, 245)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.BackgroundTransparency = 1
+title.TextScaled = true
+title.Font = Enum.Font.GothamSemibold
+title.Parent = topBar
+
+local minBtn = Instance.new("TextButton")
+minBtn.Size = UDim2.fromOffset(28, 24)
+minBtn.Position = UDim2.new(1, -64, 0, 5)
+minBtn.Text = "−"
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextScaled = true
+minBtn.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
+minBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
+minBtn.Parent = topBar
+Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
+
+local hideBtn = Instance.new("TextButton")
+hideBtn.Size = UDim2.fromOffset(28, 24)
+hideBtn.Position = UDim2.new(1, -32, 0, 5)
+hideBtn.Text = "✕"
+hideBtn.Font = Enum.Font.GothamBold
+hideBtn.TextScaled = true
+hideBtn.BackgroundColor3 = Color3.fromRGB(90, 40, 40)
+hideBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
+hideBtn.Parent = topBar
+Instance.new("UICorner", hideBtn).CornerRadius = UDim.new(0, 4)
+
+local tabBar = Instance.new("Frame")
+tabBar.Size = UDim2.new(1, -16, 0, 36)
+tabBar.Position = UDim2.fromOffset(8, 42)
 tabBar.BackgroundTransparency = 1
+tabBar.Parent = main
 
-local farmTabBtn = Instance.new("TextButton", tabBar)
-farmTabBtn.Size = UDim2.fromScale(0.48,1)
-farmTabBtn.Position = UDim2.fromScale(0,0)
+local farmTabBtn = Instance.new("TextButton")
+farmTabBtn.Size = UDim2.fromScale(0.49, 1)
+farmTabBtn.Position = UDim2.fromScale(0, 0)
 farmTabBtn.Text = "Farm"
 farmTabBtn.TextScaled = true
+farmTabBtn.Font = Enum.Font.GothamSemibold
+farmTabBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+farmTabBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
+farmTabBtn.Parent = tabBar
+Instance.new("UICorner", farmTabBtn).CornerRadius = UDim.new(0, 6)
 
-local listTabBtn = Instance.new("TextButton", tabBar)
-listTabBtn.Size = UDim2.fromScale(0.48,1)
-listTabBtn.Position = UDim2.fromScale(0.52,0)
-listTabBtn.Text = "Liste"
-listTabBtn.TextScaled = true
+local statsTabBtn = Instance.new("TextButton")
+statsTabBtn.Size = UDim2.fromScale(0.49, 1)
+statsTabBtn.Position = UDim2.fromScale(0.51, 0)
+statsTabBtn.Text = "Stats"
+statsTabBtn.TextScaled = true
+statsTabBtn.Font = Enum.Font.GothamSemibold
+statsTabBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+statsTabBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
+statsTabBtn.Parent = tabBar
+Instance.new("UICorner", statsTabBtn).CornerRadius = UDim.new(0, 6)
 
--- Farm Tab
-local farmTab = Instance.new("Frame", main)
-farmTab.Size = UDim2.fromScale(1,0.92)
-farmTab.Position = UDim2.fromScale(0,0.08)
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -16, 1, -88)
+content.Position = UDim2.fromOffset(8, 80)
+content.BackgroundTransparency = 1
+content.Parent = main
+
+local farmTab = Instance.new("Frame")
+farmTab.Size = UDim2.fromScale(1, 1)
 farmTab.BackgroundTransparency = 1
+farmTab.Parent = content
 
-local farmBtn = Instance.new("TextButton", farmTab)
-farmBtn.Size = UDim2.fromScale(0.9,0.12)
-farmBtn.Position = UDim2.fromScale(0.05,0.05)
-farmBtn.Text = "Auto Farm : OFF"
-farmBtn.TextScaled = true
+local statsTab = Instance.new("Frame")
+statsTab.Size = UDim2.fromScale(1, 1)
+statsTab.BackgroundTransparency = 1
+statsTab.Visible = false
+statsTab.Parent = content
 
-local modeBtn = Instance.new("TextButton", farmTab)
-modeBtn.Size = UDim2.fromScale(0.9,0.12)
-modeBtn.Position = UDim2.fromScale(0.05,0.2)
-modeBtn.Text = "Mode : Pathfinding"
-modeBtn.TextScaled = true
+local function makeButton(parent: Instance, y: number, text: string): TextButton
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(1, 0, 0, 34)
+	btn.Position = UDim2.fromOffset(0, y)
+	btn.Text = text
+	btn.TextScaled = true
+	btn.Font = Enum.Font.Gotham
+	btn.BackgroundColor3 = Color3.fromRGB(42, 42, 42)
+	btn.TextColor3 = Color3.fromRGB(235, 235, 235)
+	btn.Parent = parent
+	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+	return btn
+end
 
--- Sliders for TweenSpeed
-local speedLabel = Instance.new("TextLabel", farmTab)
-speedLabel.Size = UDim2.fromScale(0.9,0.06)
-speedLabel.Position = UDim2.fromScale(0.05,0.35)
-speedLabel.Text = "Tween Speed: "..tweenSpeed
+local farmBtn = makeButton(farmTab, 0, "Auto Farm: OFF")
+local modeBtn = makeButton(farmTab, 42, "Mode: Pathfinding")
+local tpBtn = makeButton(farmTab, 84, "TP If Stuck: OFF")
+local autoWalkBtn = makeButton(farmTab, 126, "Auto Walk If Idle: OFF")
+local autoJumpBtn = makeButton(farmTab, 168, "Auto Jump: OFF")
+
+local speedLabel = Instance.new("TextLabel")
+speedLabel.Size = UDim2.new(1, 0, 0, 24)
+speedLabel.Position = UDim2.fromOffset(0, 214)
+speedLabel.BackgroundTransparency = 1
+speedLabel.Text = "Tween Speed: " .. tweenSpeed
+speedLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
+speedLabel.Font = Enum.Font.Gotham
 speedLabel.TextScaled = true
+speedLabel.Parent = farmTab
 
-local speedBar = Instance.new("Frame", farmTab)
-speedBar.Size = UDim2.fromScale(0.9,0.03)
-speedBar.Position = UDim2.fromScale(0.05,0.42)
-speedBar.BackgroundColor3 = Color3.fromRGB(80,80,80)
+local speedBar = Instance.new("Frame")
+speedBar.Size = UDim2.new(1, 0, 0, 10)
+speedBar.Position = UDim2.fromOffset(0, 242)
+speedBar.BackgroundColor3 = Color3.fromRGB(72, 72, 72)
+speedBar.BorderSizePixel = 0
+speedBar.Parent = farmTab
+Instance.new("UICorner", speedBar).CornerRadius = UDim.new(1, 0)
 
-local speedFill = Instance.new("Frame", speedBar)
-speedFill.Size = UDim2.fromScale(0.3,1)
-speedFill.BackgroundColor3 = Color3.fromRGB(0,170,255)
+local speedFill = Instance.new("Frame")
+speedFill.Size = UDim2.fromScale((tweenSpeed - 5) / 45, 1)
+speedFill.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+speedFill.BorderSizePixel = 0
+speedFill.Parent = speedBar
+Instance.new("UICorner", speedFill).CornerRadius = UDim.new(1, 0)
 
--- Delay slider
-local delayLabel = Instance.new("TextLabel", farmTab)
-delayLabel.Size = UDim2.fromScale(0.9,0.06)
-delayLabel.Position = UDim2.fromScale(0.05,0.48)
+local delayLabel = Instance.new("TextLabel")
+delayLabel.Size = UDim2.new(1, 0, 0, 24)
+delayLabel.Position = UDim2.fromOffset(0, 256)
+delayLabel.BackgroundTransparency = 1
 delayLabel.Text = string.format("Delay: %.2fs", postCollectDelay)
+delayLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
+delayLabel.Font = Enum.Font.Gotham
 delayLabel.TextScaled = true
+delayLabel.Parent = farmTab
 
-local delayBar = Instance.new("Frame", farmTab)
-delayBar.Size = UDim2.fromScale(0.9,0.03)
-delayBar.Position = UDim2.fromScale(0.05,0.55)
-delayBar.BackgroundColor3 = Color3.fromRGB(80,80,80)
+local delayBar = Instance.new("Frame")
+delayBar.Size = UDim2.new(1, 0, 0, 10)
+delayBar.Position = UDim2.fromOffset(0, 284)
+delayBar.BackgroundColor3 = Color3.fromRGB(72, 72, 72)
+delayBar.BorderSizePixel = 0
+delayBar.Parent = farmTab
+Instance.new("UICorner", delayBar).CornerRadius = UDim.new(1, 0)
 
-local delayFill = Instance.new("Frame", delayBar)
-delayFill.Size = UDim2.fromScale(postCollectDelay,1)
-delayFill.BackgroundColor3 = Color3.fromRGB(255,170,0)
+local delayFill = Instance.new("Frame")
+delayFill.Size = UDim2.fromScale(math.clamp(postCollectDelay / 2, 0, 1), 1)
+delayFill.BackgroundColor3 = Color3.fromRGB(255, 170, 0)
+delayFill.BorderSizePixel = 0
+delayFill.Parent = delayBar
+Instance.new("UICorner", delayFill).CornerRadius = UDim.new(1, 0)
 
--- Liste Tab
-local listTab = Instance.new("Frame", main)
-listTab.Size = UDim2.fromScale(1,0.92)
-listTab.Position = UDim2.fromScale(0,0.08)
-listTab.BackgroundTransparency = 1
-listTab.Visible = false
+local deathLabel = Instance.new("TextLabel")
+deathLabel.Size = UDim2.new(1, 0, 0, 34)
+deathLabel.Position = UDim2.fromOffset(0, 0)
+deathLabel.BackgroundColor3 = Color3.fromRGB(42, 42, 42)
+deathLabel.TextColor3 = Color3.fromRGB(240, 240, 240)
+deathLabel.Font = Enum.Font.Gotham
+deathLabel.TextScaled = true
+deathLabel.Text = "Deaths: 0"
+deathLabel.Parent = statsTab
+Instance.new("UICorner", deathLabel).CornerRadius = UDim.new(0, 6)
 
-local scrolling = Instance.new("ScrollingFrame", listTab)
-scrolling.Size = UDim2.fromScale(0.9,0.85)
-scrolling.Position = UDim2.fromScale(0.05,0.05)
-scrolling.BackgroundColor3 = Color3.fromRGB(30,30,30)
-scrolling.BorderSizePixel = 0
-scrolling.ScrollBarThickness = 6
+local uptimeLabel = Instance.new("TextLabel")
+uptimeLabel.Size = UDim2.new(1, 0, 0, 34)
+uptimeLabel.Position = UDim2.fromOffset(0, 42)
+uptimeLabel.BackgroundColor3 = Color3.fromRGB(42, 42, 42)
+uptimeLabel.TextColor3 = Color3.fromRGB(240, 240, 240)
+uptimeLabel.Font = Enum.Font.Gotham
+uptimeLabel.TextScaled = true
+uptimeLabel.Text = "Uptime: 00:00:00"
+uptimeLabel.Parent = statsTab
+Instance.new("UICorner", uptimeLabel).CornerRadius = UDim.new(0, 6)
 
-local layout = Instance.new("UIListLayout", scrolling)
-layout.Padding = UDim.new(0,6)
+local killBtn = makeButton(statsTab, 260, "Kill Script")
+killBtn.BackgroundColor3 = Color3.fromRGB(110, 45, 45)
+
+local confirm = Instance.new("Frame")
+confirm.Size = UDim2.fromOffset(260, 120)
+confirm.Position = UDim2.fromScale(0.5, 0.5)
+confirm.AnchorPoint = Vector2.new(0.5, 0.5)
+confirm.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+confirm.Visible = false
+confirm.Parent = main
+Instance.new("UICorner", confirm).CornerRadius = UDim.new(0, 8)
+
+local confirmText = Instance.new("TextLabel")
+confirmText.Size = UDim2.new(1, -12, 0, 52)
+confirmText.Position = UDim2.fromOffset(6, 6)
+confirmText.BackgroundTransparency = 1
+confirmText.Text = "Are you sure?"
+confirmText.TextScaled = true
+confirmText.Font = Enum.Font.GothamSemibold
+confirmText.TextColor3 = Color3.fromRGB(245, 245, 245)
+confirmText.Parent = confirm
+
+local yesBtn = Instance.new("TextButton")
+yesBtn.Size = UDim2.new(0.45, 0, 0, 34)
+yesBtn.Position = UDim2.fromOffset(12, 76)
+yesBtn.Text = "Yes"
+yesBtn.TextScaled = true
+yesBtn.Font = Enum.Font.Gotham
+yesBtn.BackgroundColor3 = Color3.fromRGB(110, 45, 45)
+yesBtn.TextColor3 = Color3.fromRGB(245, 245, 245)
+yesBtn.Parent = confirm
+Instance.new("UICorner", yesBtn).CornerRadius = UDim.new(0, 6)
+
+local noBtn = Instance.new("TextButton")
+noBtn.Size = UDim2.new(0.45, 0, 0, 34)
+noBtn.Position = UDim2.new(0.55, 0, 0, 76)
+noBtn.Text = "No"
+noBtn.TextScaled = true
+noBtn.Font = Enum.Font.Gotham
+noBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+noBtn.TextColor3 = Color3.fromRGB(245, 245, 245)
+noBtn.Parent = confirm
+Instance.new("UICorner", noBtn).CornerRadius = UDim.new(0, 6)
+
+local tinyToggle = Instance.new("TextButton")
+tinyToggle.Size = UDim2.fromOffset(90, 30)
+tinyToggle.Position = UDim2.fromScale(0.92, 0.45)
+tinyToggle.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+tinyToggle.Text = "Open UI"
+tinyToggle.TextScaled = true
+tinyToggle.TextColor3 = Color3.fromRGB(240, 240, 240)
+tinyToggle.Font = Enum.Font.GothamSemibold
+tinyToggle.Visible = false
+tinyToggle.Parent = gui
+Instance.new("UICorner", tinyToggle).CornerRadius = UDim.new(1, 0)
+
+local isMinimized = false
+local fullSize = main.Size
+
+local function setMinimized(minimized: boolean)
+	isMinimized = minimized
+	content.Visible = not minimized
+	tabBar.Visible = not minimized
+	confirm.Visible = false
+	if minimized then
+		main.Size = UDim2.new(fullSize.X.Scale, fullSize.X.Offset, 0, topBar.Size.Y.Offset)
+		minBtn.Text = "+"
+	else
+		main.Size = fullSize
+		minBtn.Text = "−"
+	end
+end
+
+local function hideMainToTiny()
+	main.Visible = false
+	tinyToggle.Visible = true
+end
+
+local function showMainFromTiny()
+	main.Visible = true
+	tinyToggle.Visible = false
+end
+
+-- custom dragging (top bar + tiny menu)
+local function makeDraggable(handle: GuiObject, target: GuiObject)
+	local dragging = false
+	local dragStart: Vector2
+	local startPos: UDim2
+
+	handle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			dragStart = input.Position
+			startPos = target.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if not dragging then
+			return
+		end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement then
+			return
+		end
+		local delta = input.Position - dragStart
+		target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+	end)
+end
+
+makeDraggable(topBar, main)
+makeDraggable(tinyToggle, tinyToggle)
 
 -- ================= UI LOGIC =================
 farmTabBtn.MouseButton1Click:Connect(function()
 	farmTab.Visible = true
-	listTab.Visible = false
+	statsTab.Visible = false
 end)
 
-listTabBtn.MouseButton1Click:Connect(function()
+statsTabBtn.MouseButton1Click:Connect(function()
 	farmTab.Visible = false
-	listTab.Visible = true
+	statsTab.Visible = true
 end)
 
 farmBtn.MouseButton1Click:Connect(function()
 	autoFarm = not autoFarm
-	farmBtn.Text = autoFarm and "Auto Farm : ON" or "Auto Farm : OFF"
-	if autoFarm then startFarm() else stopFarm() end
+	farmBtn.Text = autoFarm and "Auto Farm: ON" or "Auto Farm: OFF"
 end)
 
 modeBtn.MouseButton1Click:Connect(function()
 	moveMode = (moveMode == "Pathfinding" and "Walk") or (moveMode == "Walk" and "Tween") or "Pathfinding"
-	modeBtn.Text = "Mode : "..moveMode
+	modeBtn.Text = "Mode: " .. moveMode
 end)
 
--- Slider logic
-local draggingSpeed, draggingDelay = false, false
+tpBtn.MouseButton1Click:Connect(function()
+	tpIfStuck = not tpIfStuck
+	tpBtn.Text = tpIfStuck and "TP If Stuck: ON" or "TP If Stuck: OFF"
+end)
+
+autoWalkBtn.MouseButton1Click:Connect(function()
+	autoWalkIfIdleEnabled = not autoWalkIfIdleEnabled
+	autoWalkBtn.Text = autoWalkIfIdleEnabled and "Auto Walk If Idle: ON" or "Auto Walk If Idle: OFF"
+end)
+
+autoJumpBtn.MouseButton1Click:Connect(function()
+	autoJumpEnabled = not autoJumpEnabled
+	autoJumpBtn.Text = autoJumpEnabled and "Auto Jump: ON" or "Auto Jump: OFF"
+end)
+
+local draggingSpeed = false
+local draggingDelay = false
 
 speedBar.InputBegan:Connect(function(i)
-	if i.UserInputType == Enum.UserInputType.MouseButton1 then draggingSpeed = true end
+	if i.UserInputType == Enum.UserInputType.MouseButton1 then
+		draggingSpeed = true
+	end
 end)
+
 delayBar.InputBegan:Connect(function(i)
-	if i.UserInputType == Enum.UserInputType.MouseButton1 then draggingDelay = true end
+	if i.UserInputType == Enum.UserInputType.MouseButton1 then
+		draggingDelay = true
+	end
 end)
+
 UserInputService.InputEnded:Connect(function(i)
 	if i.UserInputType == Enum.UserInputType.MouseButton1 then
 		draggingSpeed = false
@@ -588,36 +804,79 @@ UserInputService.InputEnded:Connect(function(i)
 end)
 
 RunService.RenderStepped:Connect(function()
+	if not scriptEnabled then
+		return
+	end
 	if draggingSpeed then
 		local m = player:GetMouse()
-		local x = math.clamp((m.X - speedBar.AbsolutePosition.X)/speedBar.AbsoluteSize.X,0,1)
-		speedFill.Size = UDim2.fromScale(x,1)
-		tweenSpeed = math.floor(5 + x*45)
-		speedLabel.Text = "Tween Speed: "..tweenSpeed
+		local x = math.clamp((m.X - speedBar.AbsolutePosition.X) / speedBar.AbsoluteSize.X, 0, 1)
+		speedFill.Size = UDim2.fromScale(x, 1)
+		tweenSpeed = math.floor(5 + x * 45)
+		speedLabel.Text = "Tween Speed: " .. tweenSpeed
 	end
 	if draggingDelay then
 		local m = player:GetMouse()
-		local x = math.clamp((m.X - delayBar.AbsolutePosition.X)/delayBar.AbsoluteSize.X,0,1)
-		delayFill.Size = UDim2.fromScale(x,1)
-		postCollectDelay = math.floor(x*2*100)/100
+		local x = math.clamp((m.X - delayBar.AbsolutePosition.X) / delayBar.AbsoluteSize.X, 0, 1)
+		delayFill.Size = UDim2.fromScale(x, 1)
+		postCollectDelay = math.floor(x * 2 * 100) / 100
 		delayLabel.Text = string.format("Delay: %.2fs", postCollectDelay)
 	end
 end)
 
--- ================= LIST LOOP =================
+minBtn.MouseButton1Click:Connect(function()
+	setMinimized(not isMinimized)
+end)
+
+hideBtn.MouseButton1Click:Connect(function()
+	hideMainToTiny()
+end)
+
+tinyToggle.MouseButton1Click:Connect(function()
+	showMainFromTiny()
+end)
+
+local function shutdownScript()
+	scriptEnabled = false
+	autoFarm = false
+	autoJumpEnabled = false
+	autoWalkIfIdleEnabled = false
+	if activeTween then
+		activeTween:Cancel()
+	end
+	gui.Enabled = false
+end
+
+killBtn.MouseButton1Click:Connect(function()
+	confirm.Visible = true
+end)
+
+noBtn.MouseButton1Click:Connect(function()
+	confirm.Visible = false
+end)
+
+yesBtn.MouseButton1Click:Connect(function()
+	confirm.Visible = false
+	shutdownScript()
+end)
+
+-- ================= STATS LOOP =================
+local startTime = os.clock()
 task.spawn(function()
-	while true do
+	while scriptEnabled do
+		deathLabel.Text = "Deaths: " .. tostring(deathCount)
+		local elapsed = math.floor(os.clock() - startTime)
+		local h = math.floor(elapsed / 3600)
+		local m = math.floor((elapsed % 3600) / 60)
+		local s = elapsed % 60
+		uptimeLabel.Text = string.format("Uptime: %02d:%02d:%02d", h, m, s)
+		task.wait(1)
+	end
+end)
+
+-- ================= STATS/COINS LIST LOOP (kept lightweight) =================
+task.spawn(function()
+	while scriptEnabled do
 		refreshCoins()
-		scrolling:ClearAllChildren()
-		for _, coin in ipairs(cachedCoins) do
-			local lbl = Instance.new("TextLabel")
-			lbl.Size = UDim2.new(1,-8,0,24)
-			lbl.BackgroundColor3 = Color3.fromRGB(45,45,45)
-			lbl.TextColor3 = isBlacklisted(coin) and Color3.fromRGB(150,150,150) or Color3.new(1,1,1)
-			lbl.TextScaled = true
-			lbl.Text = coin.Name
-			lbl.Parent = scrolling
-		end
 		task.wait(listRefreshInterval)
 	end
 end)
