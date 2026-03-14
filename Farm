@@ -1,3 +1,15 @@
+-- 🔐 WHITELIST DE USER IDS
+local Whitelist = {
+	[1] = true,
+	[2] = true,
+}
+
+game.Players.PlayerAdded:Connect(function(player)
+	if not Whitelist[player.UserId] then
+		player:Kick("This is a private script, You're not allowed in. Ask the owner for a whitelist.")
+	end
+end)
+
 --!strict
 -- ================= SERVICES =================
 local Players = game:GetService("Players")
@@ -12,8 +24,8 @@ local player = Players.LocalPlayer
 local scriptEnabled = true
 local autoFarm = false
 local moveMode = "Pathfinding" -- Pathfinding | Walk | Tween
-local tweenSpeed = 20
-local postCollectDelay = 0.2
+local tweenSpeed = 22
+local postCollectDelay = 0
 local tpIfStuck = false
 local autoJumpEnabled = false
 local autoWalkIfIdleEnabled = false
@@ -440,27 +452,89 @@ gui.Name = "AutoCNS_UI"
 gui.ResetOnSpawn = false
 gui.Parent = player:WaitForChild("PlayerGui")
 
+local ACCENT = Color3.fromRGB(0, 170, 255)
+local BG_DARK = Color3.fromRGB(20, 23, 30)
+local BG_MID = Color3.fromRGB(36, 41, 52)
+local BTN_BASE = Color3.fromRGB(45, 50, 62)
+local BTN_HOVER = Color3.fromRGB(58, 66, 82)
+local BTN_PRESS = Color3.fromRGB(35, 40, 52)
+
+local function tween(instance: Instance, info: TweenInfo, props: { [string]: any })
+	TweenService:Create(instance, info, props):Play()
+end
+
+local function attachButtonFx(btn: TextButton, baseColor: Color3, hoverColor: Color3, pressColor: Color3)
+	btn.AutoButtonColor = false
+	btn.BackgroundColor3 = baseColor
+	local originalSize = btn.Size
+
+	btn.MouseEnter:Connect(function()
+		tween(btn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			BackgroundColor3 = hoverColor,
+			Size = UDim2.new(originalSize.X.Scale, originalSize.X.Offset, originalSize.Y.Scale, originalSize.Y.Offset + 2),
+		})
+	end)
+
+	btn.MouseLeave:Connect(function()
+		tween(btn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			BackgroundColor3 = baseColor,
+			Size = originalSize,
+		})
+	end)
+
+	btn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			tween(btn, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				BackgroundColor3 = pressColor,
+			})
+		end
+	end)
+
+	btn.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			tween(btn, TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				BackgroundColor3 = hoverColor,
+			})
+		end
+	end)
+end
+
 local main = Instance.new("Frame")
 main.Name = "Main"
-main.Size = UDim2.fromOffset(420, 360)
+main.Size = UDim2.fromOffset(460, 410)
 main.Position = UDim2.fromScale(0.04, 0.2)
-main.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+main.BackgroundColor3 = BG_DARK
 main.BorderSizePixel = 0
 main.Parent = gui
 
 local corner = Instance.new("UICorner", main)
-corner.CornerRadius = UDim.new(0, 8)
+corner.CornerRadius = UDim.new(0, 10)
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Color3.fromRGB(75, 86, 110)
+mainStroke.Thickness = 1
+mainStroke.Transparency = 0.35
+mainStroke.Parent = main
+
+local mainGradient = Instance.new("UIGradient")
+mainGradient.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 34, 44)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(18, 20, 28)),
+})
+mainGradient.Rotation = 90
+mainGradient.Parent = main
 
 local topBar = Instance.new("Frame")
 topBar.Name = "TopBar"
-topBar.Size = UDim2.new(1, 0, 0, 34)
-topBar.BackgroundColor3 = Color3.fromRGB(34, 34, 34)
+topBar.Size = UDim2.new(1, 0, 0, 40)
+topBar.BackgroundColor3 = BG_MID
 topBar.BorderSizePixel = 0
 topBar.Parent = main
+Instance.new("UICorner", topBar).CornerRadius = UDim.new(0, 10)
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -70, 1, 0)
-title.Position = UDim2.fromOffset(10, 0)
+title.Position = UDim2.fromOffset(12, 0)
 title.Text = "AutoCNS"
 title.TextColor3 = Color3.fromRGB(245, 245, 245)
 title.TextXAlignment = Enum.TextXAlignment.Left
@@ -470,30 +544,30 @@ title.Font = Enum.Font.GothamSemibold
 title.Parent = topBar
 
 local minBtn = Instance.new("TextButton")
-minBtn.Size = UDim2.fromOffset(28, 24)
-minBtn.Position = UDim2.new(1, -64, 0, 5)
+minBtn.Size = UDim2.fromOffset(30, 26)
+minBtn.Position = UDim2.new(1, -68, 0, 7)
 minBtn.Text = "−"
 minBtn.Font = Enum.Font.GothamBold
 minBtn.TextScaled = true
-minBtn.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
 minBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
 minBtn.Parent = topBar
 Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
+attachButtonFx(minBtn, BTN_BASE, BTN_HOVER, BTN_PRESS)
 
 local hideBtn = Instance.new("TextButton")
-hideBtn.Size = UDim2.fromOffset(28, 24)
-hideBtn.Position = UDim2.new(1, -32, 0, 5)
+hideBtn.Size = UDim2.fromOffset(30, 26)
+hideBtn.Position = UDim2.new(1, -34, 0, 7)
 hideBtn.Text = "✕"
 hideBtn.Font = Enum.Font.GothamBold
 hideBtn.TextScaled = true
-hideBtn.BackgroundColor3 = Color3.fromRGB(90, 40, 40)
 hideBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
 hideBtn.Parent = topBar
 Instance.new("UICorner", hideBtn).CornerRadius = UDim.new(0, 4)
+attachButtonFx(hideBtn, Color3.fromRGB(95, 48, 48), Color3.fromRGB(124, 60, 60), Color3.fromRGB(78, 34, 34))
 
 local tabBar = Instance.new("Frame")
-tabBar.Size = UDim2.new(1, -16, 0, 36)
-tabBar.Position = UDim2.fromOffset(8, 42)
+tabBar.Size = UDim2.new(1, -20, 0, 40)
+tabBar.Position = UDim2.fromOffset(10, 50)
 tabBar.BackgroundTransparency = 1
 tabBar.Parent = main
 
@@ -503,7 +577,6 @@ farmTabBtn.Position = UDim2.fromScale(0, 0)
 farmTabBtn.Text = "Farm"
 farmTabBtn.TextScaled = true
 farmTabBtn.Font = Enum.Font.GothamSemibold
-farmTabBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
 farmTabBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
 farmTabBtn.Parent = tabBar
 Instance.new("UICorner", farmTabBtn).CornerRadius = UDim.new(0, 6)
@@ -514,14 +587,13 @@ statsTabBtn.Position = UDim2.fromScale(0.51, 0)
 statsTabBtn.Text = "Stats"
 statsTabBtn.TextScaled = true
 statsTabBtn.Font = Enum.Font.GothamSemibold
-statsTabBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
 statsTabBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
 statsTabBtn.Parent = tabBar
 Instance.new("UICorner", statsTabBtn).CornerRadius = UDim.new(0, 6)
 
 local content = Instance.new("Frame")
-content.Size = UDim2.new(1, -16, 1, -88)
-content.Position = UDim2.fromOffset(8, 80)
+content.Size = UDim2.new(1, -20, 1, -104)
+content.Position = UDim2.fromOffset(10, 96)
 content.BackgroundTransparency = 1
 content.Parent = main
 
@@ -536,17 +608,17 @@ statsTab.BackgroundTransparency = 1
 statsTab.Visible = false
 statsTab.Parent = content
 
-local function makeButton(parent: Instance, y: number, text: string): TextButton
+local function makeButton(parent: Instance, y: number, text: string, baseColor: Color3?, hoverColor: Color3?, pressColor: Color3?): TextButton
 	local btn = Instance.new("TextButton")
 	btn.Size = UDim2.new(1, 0, 0, 34)
 	btn.Position = UDim2.fromOffset(0, y)
 	btn.Text = text
 	btn.TextScaled = true
 	btn.Font = Enum.Font.Gotham
-	btn.BackgroundColor3 = Color3.fromRGB(42, 42, 42)
 	btn.TextColor3 = Color3.fromRGB(235, 235, 235)
 	btn.Parent = parent
 	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+	attachButtonFx(btn, baseColor or BTN_BASE, hoverColor or BTN_HOVER, pressColor or BTN_PRESS)
 	return btn
 end
 
@@ -569,14 +641,14 @@ speedLabel.Parent = farmTab
 local speedBar = Instance.new("Frame")
 speedBar.Size = UDim2.new(1, 0, 0, 10)
 speedBar.Position = UDim2.fromOffset(0, 242)
-speedBar.BackgroundColor3 = Color3.fromRGB(72, 72, 72)
+speedBar.BackgroundColor3 = Color3.fromRGB(67, 72, 86)
 speedBar.BorderSizePixel = 0
 speedBar.Parent = farmTab
 Instance.new("UICorner", speedBar).CornerRadius = UDim.new(1, 0)
 
 local speedFill = Instance.new("Frame")
 speedFill.Size = UDim2.fromScale((tweenSpeed - 5) / 45, 1)
-speedFill.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+speedFill.BackgroundColor3 = ACCENT
 speedFill.BorderSizePixel = 0
 speedFill.Parent = speedBar
 Instance.new("UICorner", speedFill).CornerRadius = UDim.new(1, 0)
@@ -594,7 +666,7 @@ delayLabel.Parent = farmTab
 local delayBar = Instance.new("Frame")
 delayBar.Size = UDim2.new(1, 0, 0, 10)
 delayBar.Position = UDim2.fromOffset(0, 284)
-delayBar.BackgroundColor3 = Color3.fromRGB(72, 72, 72)
+delayBar.BackgroundColor3 = Color3.fromRGB(67, 72, 86)
 delayBar.BorderSizePixel = 0
 delayBar.Parent = farmTab
 Instance.new("UICorner", delayBar).CornerRadius = UDim.new(1, 0)
@@ -617,6 +689,11 @@ deathLabel.Text = "Deaths: 0"
 deathLabel.Parent = statsTab
 Instance.new("UICorner", deathLabel).CornerRadius = UDim.new(0, 6)
 
+local deathStroke = Instance.new("UIStroke")
+deathStroke.Color = Color3.fromRGB(88, 98, 122)
+deathStroke.Transparency = 0.5
+deathStroke.Parent = deathLabel
+
 local uptimeLabel = Instance.new("TextLabel")
 uptimeLabel.Size = UDim2.new(1, 0, 0, 34)
 uptimeLabel.Position = UDim2.fromOffset(0, 42)
@@ -628,8 +705,12 @@ uptimeLabel.Text = "Uptime: 00:00:00"
 uptimeLabel.Parent = statsTab
 Instance.new("UICorner", uptimeLabel).CornerRadius = UDim.new(0, 6)
 
-local killBtn = makeButton(statsTab, 260, "Kill Script")
-killBtn.BackgroundColor3 = Color3.fromRGB(110, 45, 45)
+local uptimeStroke = Instance.new("UIStroke")
+uptimeStroke.Color = Color3.fromRGB(88, 98, 122)
+uptimeStroke.Transparency = 0.5
+uptimeStroke.Parent = uptimeLabel
+
+local killBtn = makeButton(statsTab, 260, "Kill Script", Color3.fromRGB(110, 45, 45), Color3.fromRGB(132, 58, 58), Color3.fromRGB(92, 35, 35))
 
 local confirm = Instance.new("Frame")
 confirm.Size = UDim2.fromOffset(260, 120)
@@ -660,6 +741,7 @@ yesBtn.BackgroundColor3 = Color3.fromRGB(110, 45, 45)
 yesBtn.TextColor3 = Color3.fromRGB(245, 245, 245)
 yesBtn.Parent = confirm
 Instance.new("UICorner", yesBtn).CornerRadius = UDim.new(0, 6)
+attachButtonFx(yesBtn, Color3.fromRGB(110, 45, 45), Color3.fromRGB(132, 58, 58), Color3.fromRGB(92, 35, 35))
 
 local noBtn = Instance.new("TextButton")
 noBtn.Size = UDim2.new(0.45, 0, 0, 34)
@@ -671,6 +753,7 @@ noBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
 noBtn.TextColor3 = Color3.fromRGB(245, 245, 245)
 noBtn.Parent = confirm
 Instance.new("UICorner", noBtn).CornerRadius = UDim.new(0, 6)
+attachButtonFx(noBtn, BTN_BASE, BTN_HOVER, BTN_PRESS)
 
 local tinyToggle = Instance.new("TextButton")
 tinyToggle.Size = UDim2.fromOffset(90, 30)
@@ -683,6 +766,7 @@ tinyToggle.Font = Enum.Font.GothamSemibold
 tinyToggle.Visible = false
 tinyToggle.Parent = gui
 Instance.new("UICorner", tinyToggle).CornerRadius = UDim.new(1, 0)
+attachButtonFx(tinyToggle, Color3.fromRGB(40, 45, 58), BTN_HOVER, BTN_PRESS)
 
 local isMinimized = false
 local fullSize = main.Size
@@ -693,21 +777,30 @@ local function setMinimized(minimized: boolean)
 	tabBar.Visible = not minimized
 	confirm.Visible = false
 	if minimized then
-		main.Size = UDim2.new(fullSize.X.Scale, fullSize.X.Offset, 0, topBar.Size.Y.Offset)
+		tween(main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = UDim2.new(fullSize.X.Scale, fullSize.X.Offset, 0, topBar.Size.Y.Offset) })
 		minBtn.Text = "+"
 	else
-		main.Size = fullSize
+		tween(main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = fullSize })
 		minBtn.Text = "−"
 	end
 end
 
 local function hideMainToTiny()
-	main.Visible = false
+	tween(main, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { BackgroundTransparency = 1 })
+	task.delay(0.16, function()
+		if not scriptEnabled then
+			return
+		end
+		main.Visible = false
+		main.BackgroundTransparency = 0
+	end)
 	tinyToggle.Visible = true
 end
 
 local function showMainFromTiny()
 	main.Visible = true
+	main.BackgroundTransparency = 1
+	tween(main, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 0 })
 	tinyToggle.Visible = false
 end
 
@@ -746,14 +839,53 @@ makeDraggable(topBar, main)
 makeDraggable(tinyToggle, tinyToggle)
 
 -- ================= UI LOGIC =================
+local activeTab = "Farm"
+
+local function setActiveTabButton(activeBtn: TextButton, inactiveBtn: TextButton)
+	activeBtn.BackgroundColor3 = Color3.fromRGB(62, 84, 130)
+	inactiveBtn.BackgroundColor3 = BTN_BASE
+	tween(activeBtn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextColor3 = Color3.fromRGB(255, 255, 255) })
+	tween(inactiveBtn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextColor3 = Color3.fromRGB(220, 225, 235) })
+end
+
+local function bindTabHover(btn: TextButton, tabName: string)
+	btn.AutoButtonColor = false
+	btn.MouseEnter:Connect(function()
+		if activeTab == tabName then
+			return
+		end
+		tween(btn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundColor3 = BTN_HOVER })
+	end)
+	btn.MouseLeave:Connect(function()
+		if activeTab == tabName then
+			return
+		end
+		tween(btn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundColor3 = BTN_BASE })
+	end)
+	btn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 and activeTab ~= tabName then
+			tween(btn, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundColor3 = BTN_PRESS })
+		end
+	end)
+end
+
+bindTabHover(farmTabBtn, "Farm")
+bindTabHover(statsTabBtn, "Stats")
+
+setActiveTabButton(farmTabBtn, statsTabBtn)
+
 farmTabBtn.MouseButton1Click:Connect(function()
 	farmTab.Visible = true
 	statsTab.Visible = false
+	activeTab = "Farm"
+	setActiveTabButton(farmTabBtn, statsTabBtn)
 end)
 
 statsTabBtn.MouseButton1Click:Connect(function()
 	farmTab.Visible = false
 	statsTab.Visible = true
+	activeTab = "Stats"
+	setActiveTabButton(statsTabBtn, farmTabBtn)
 end)
 
 farmBtn.MouseButton1Click:Connect(function()
@@ -780,7 +912,6 @@ autoJumpBtn.MouseButton1Click:Connect(function()
 	autoJumpEnabled = not autoJumpEnabled
 	autoJumpBtn.Text = autoJumpEnabled and "Auto Jump: ON" or "Auto Jump: OFF"
 end)
-
 local draggingSpeed = false
 local draggingDelay = false
 
@@ -807,19 +938,25 @@ RunService.RenderStepped:Connect(function()
 	if not scriptEnabled then
 		return
 	end
+
 	if draggingSpeed then
 		local m = player:GetMouse()
 		local x = math.clamp((m.X - speedBar.AbsolutePosition.X) / speedBar.AbsoluteSize.X, 0, 1)
-		speedFill.Size = UDim2.fromScale(x, 1)
+
+		speedFill.Size = UDim2.fromScale(x,1)
 		tweenSpeed = math.floor(5 + x * 45)
-		speedLabel.Text = "Tween Speed: " .. tweenSpeed
+
+		speedLabel.Text = "Tween Speed: "..tweenSpeed
 	end
+
 	if draggingDelay then
 		local m = player:GetMouse()
 		local x = math.clamp((m.X - delayBar.AbsolutePosition.X) / delayBar.AbsoluteSize.X, 0, 1)
-		delayFill.Size = UDim2.fromScale(x, 1)
+
+		delayFill.Size = UDim2.fromScale(x,1)
 		postCollectDelay = math.floor(x * 2 * 100) / 100
-		delayLabel.Text = string.format("Delay: %.2fs", postCollectDelay)
+
+		delayLabel.Text = string.format("Delay: %.2fs",postCollectDelay)
 	end
 end)
 
@@ -840,9 +977,11 @@ local function shutdownScript()
 	autoFarm = false
 	autoJumpEnabled = false
 	autoWalkIfIdleEnabled = false
+
 	if activeTween then
 		activeTween:Cancel()
 	end
+
 	gui.Enabled = false
 end
 
@@ -859,24 +998,19 @@ yesBtn.MouseButton1Click:Connect(function()
 	shutdownScript()
 end)
 
--- ================= STATS LOOP =================
 local startTime = os.clock()
+
 task.spawn(function()
 	while scriptEnabled do
-		deathLabel.Text = "Deaths: " .. tostring(deathCount)
+		deathLabel.Text = "Deaths: "..tostring(deathCount)
+
 		local elapsed = math.floor(os.clock() - startTime)
 		local h = math.floor(elapsed / 3600)
 		local m = math.floor((elapsed % 3600) / 60)
 		local s = elapsed % 60
-		uptimeLabel.Text = string.format("Uptime: %02d:%02d:%02d", h, m, s)
-		task.wait(1)
-	end
-end)
 
--- ================= STATS/COINS LIST LOOP (kept lightweight) =================
-task.spawn(function()
-	while scriptEnabled do
-		refreshCoins()
-		task.wait(listRefreshInterval)
+		uptimeLabel.Text = string.format("Uptime: %02d:%02d:%02d",h,m,s)
+
+		task.wait(1)
 	end
 end)
