@@ -1,0 +1,623 @@
+-- 🔐 WHITELIST DE USER IDS
+-- Ajoute simplement les UserIds ici
+local Whitelist = {
+	[1] = true, -- Exemple joueur 1
+	[2] = true, -- Exemple joueur 2
+	-- Ajoute autant de joueurs que tu veux
+}
+
+-- 🔍 Vérification des joueurs
+game.Players.PlayerAdded:Connect(function(player)
+	if not Whitelist[player.UserId] then
+		player:Kick("This is a private script, You're not allowed in. Ask the owner for a whitelist.")
+	end
+end)
+--==============AUTOJUMP===============--
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+
+-- PARAMÈTRES
+local RAY_DISTANCE = 4
+local RAY_HEIGHT_OFFSET = -1
+local JUMP_COOLDOWN = 0.5
+
+local humanoid
+local rootPart
+local lastJump = 0
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+-- Setup à chaque respawn
+local function setupCharacter(character)
+	humanoid = character:WaitForChild("Humanoid")
+	rootPart = character:WaitForChild("HumanoidRootPart")
+	rayParams.FilterDescendantsInstances = { character }
+	lastJump = 0
+end
+
+-- Initial + respawn
+if player.Character then
+	setupCharacter(player.Character)
+end
+player.CharacterAdded:Connect(setupCharacter)
+
+RunService.RenderStepped:Connect(function()
+	if not humanoid or not rootPart then return end
+
+	-- ❌ pas d'auto-jump en grimpant
+	if humanoid:GetState() == Enum.HumanoidStateType.Climbing then return end
+	if tick() - lastJump < JUMP_COOLDOWN then return end
+	if humanoid.FloorMaterial == Enum.Material.Air then return end
+
+	local rayOrigin = rootPart.Position + Vector3.new(0, RAY_HEIGHT_OFFSET, 0)
+	local rayDirection = rootPart.CFrame.LookVector * RAY_DISTANCE
+
+	local result = workspace:Raycast(rayOrigin, rayDirection, rayParams)
+
+	if result and result.Instance and result.Instance.CanCollide then
+		humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		lastJump = tick()
+	end
+end)
+
+
+--=========AUTO WALK IF IDLE============--
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+
+ --PARAMÈTRES
+local IDLE_TIME = 5
+local MOVE_DISTANCE = 10
+local WALL_DETECTION_DISTANCE = 3
+local POSITION_EPSILON = 0.15
+
+local humanoid
+local rootPart
+local lastPosition
+local idleTimer = 0
+local isAutoMoving = false
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+ --Direction aléatoire
+local function getRandomDirection()
+	local angle = math.random() * math.pi * 2
+	return Vector3.new(math.cos(angle), 0, math.sin(angle))
+end
+
+-- Mur devant ?
+local function isWallAhead(direction)
+	local result = workspace:Raycast(
+		rootPart.Position,
+		direction.Unit * WALL_DETECTION_DISTANCE,
+		rayParams
+	)
+	return result and result.Instance and result.Instance.CanCollide
+end
+
+-- Setup à chaque respawn
+local function setupCharacter(character)
+	humanoid = character:WaitForChild("Humanoid")
+	rootPart = character:WaitForChild("HumanoidRootPart")
+	lastPosition = rootPart.Position
+	idleTimer = 0
+	isAutoMoving = false
+	rayParams.FilterDescendantsInstances = { character }
+end
+
+if player.Character then
+	setupCharacter(player.Character)
+end
+player.CharacterAdded:Connect(setupCharacter)
+
+RunService.Heartbeat:Connect(function(dt)
+	if not humanoid or not rootPart then return end
+
+	-- Détection mouvement
+	if (rootPart.Position - lastPosition).Magnitude > POSITION_EPSILON then
+		idleTimer = 0
+		isAutoMoving = false
+	else
+		idleTimer += dt
+	end
+
+	lastPosition = rootPart.Position
+
+	-- AFK détecté
+	if idleTimer >= IDLE_TIME and not isAutoMoving then
+		isAutoMoving = true
+		idleTimer = 0
+
+		task.spawn(function()
+			local direction = getRandomDirection()
+
+			for i = 1, 8 do
+				if not isWallAhead(direction) then break end
+				direction = getRandomDirection()
+			end
+
+			humanoid:MoveTo(rootPart.Position + direction.Unit * MOVE_DISTANCE)
+			humanoid.MoveToFinished:Wait()
+			isAutoMoving = false
+		end)
+	end
+end)
+
+
+
+
+
+
+
+
+--!strict
+-- ================= SERVICES =================
+local Players = game:GetService("Players")
+local PathfindingService = game:GetService("PathfindingService")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+
+-- ================= SETTINGS =================
+local autoFarm = false
+local moveMode = "Pathfinding" -- Pathfinding | Walk | Tween
+local tweenSpeed = 20
+local postCollectDelay = 0.2
+local tpIfStuck = false
+local DROP_HEIGHT_ALLOW = 6      -- hauteur mini pour accepter une chute
+local DROP_CHECK_DISTANCE = 6    -- distance avant le bord
+
+local blacklistDuration = 6
+
+-- path safety
+local MAX_PATH_DISTANCE = 300
+local LOBBY_IGNORE_DISTANCE = 500
+
+-- anti stuck
+local MAX_TARGET_TIME = 6
+local STUCK_DISTANCE = 1.5
+local STUCK_TIME = 1.2
+
+local function shouldForceDrop(targetPos: Vector3): boolean
+	if not rootPart then return false end
+
+	local heightDiff = rootPart.Position.Y - targetPos.Y
+	if heightDiff < DROP_HEIGHT_ALLOW then
+		return false
+	end
+
+	-- ray devant → vide ?
+	local rayParams = RaycastParams.new()
+	rayParams.FilterDescendantsInstances = { player.Character }
+	rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+	local origin = rootPart.Position
+	local dir = rootPart.CFrame.LookVector * DROP_CHECK_DISTANCE
+
+	local result = workspace:Raycast(origin, dir, rayParams)
+	return result == nil
+end
+
+-- ================= CHARACTER =================
+local humanoid: Humanoid?
+local rootPart: BasePart?
+
+local function bindCharacter(char: Model)
+	humanoid = char:WaitForChild("Humanoid") :: Humanoid
+	rootPart = char:WaitForChild("HumanoidRootPart") :: BasePart
+end
+
+if player.Character then
+	bindCharacter(player.Character)
+end
+
+player.CharacterAdded:Connect(function(char)
+	task.wait(0.2)
+	bindCharacter(char)
+end)
+
+-- ================= COINS =================
+local cachedCoins: {Instance} = {}
+local coinBlacklist: {[Instance]: number} = {}
+
+local function isBlacklisted(coin: Instance): boolean
+	local t = coinBlacklist[coin]
+	if not t then return false end
+	if os.clock() > t then
+		coinBlacklist[coin] = nil
+		return false
+	end
+	return true
+end
+
+local function getPos(obj: Instance): Vector3
+	if obj:IsA("BasePart") then
+		return obj.Position
+	end
+	return obj:GetPivot().Position
+end
+
+local function refreshCoins()
+	table.clear(cachedCoins)
+	for _, v in ipairs(workspace:GetDescendants()) do
+		if v.Name == "Coin_Server" and not isBlacklisted(v) then
+			table.insert(cachedCoins, v)
+		end
+	end
+end
+
+local function getNearestCoin(): Instance?
+	if not rootPart then return nil end
+	local best, bestDist = nil, math.huge
+
+	for _, coin in ipairs(cachedCoins) do
+		if not isBlacklisted(coin) then
+			local d = (getPos(coin) - rootPart.Position).Magnitude
+			if d < bestDist and d < LOBBY_IGNORE_DISTANCE then
+				bestDist = d
+				best = coin
+			end
+		end
+	end
+	return best
+end
+
+-- ================= PATH =================
+local function computePath(from: Vector3, to: Vector3): Path?
+	local dist = (to - from).Magnitude
+	if dist > MAX_PATH_DISTANCE then
+		return nil
+	end
+
+	local ok, path = pcall(function()
+		local p = PathfindingService:CreatePath({
+			AgentRadius = 1.8,
+			AgentHeight = 5,
+			AgentCanJump = true,
+			AgentJumpHeight = 12,
+			AgentMaxSlope = 50,
+			WaypointSpacing = 2,
+		})
+		p:ComputeAsync(from, to)
+		if p.Status == Enum.PathStatus.Success then
+			return p
+		end
+		return nil
+	end)
+
+	if not ok then
+		return nil
+	end
+
+	return path
+end
+
+-- ================= MOVEMENT =================
+local activeTween: Tween?
+
+local function safeMoveTo(pos: Vector3, timeout: number): boolean
+	if not humanoid or not rootPart then return false end
+
+	humanoid:MoveTo(pos)
+	local start = os.clock()
+
+	while os.clock() - start < timeout do
+		if not autoFarm then return false end
+		if (rootPart.Position - pos).Magnitude < 4 then
+			return true
+		end
+		task.wait(0.05)
+	end
+	return false
+end
+
+local function moveTo(target: Vector3, path: Path?): boolean
+	if not humanoid or not rootPart then return false end
+
+	if moveMode == "Tween" then
+		if activeTween then activeTween:Cancel() end
+		local dist = (rootPart.Position - target).Magnitude
+		local time = math.max(dist / tweenSpeed, 0.05)
+
+		activeTween = TweenService:Create(
+			rootPart,
+			TweenInfo.new(time, Enum.EasingStyle.Linear),
+			{CFrame = CFrame.new(target)}
+		)
+		activeTween:Play()
+		activeTween.Completed:Wait()
+		return true
+	end
+
+	if moveMode == "Walk" then
+		return safeMoveTo(target, 2)
+	end
+
+	if moveMode == "Pathfinding" and path then
+		local waypoints = path:GetWaypoints()
+
+		for i, wp in ipairs(waypoints) do
+			if not autoFarm then return false end
+
+			local targetPos = wp.Position
+
+			-- anticipation angle
+			if i < #waypoints then
+				local nextPos = waypoints[i + 1].Position
+				local dir = (nextPos - targetPos).Unit
+				targetPos += dir * 1.5
+			end
+
+			if wp.Action == Enum.PathWaypointAction.Jump then
+				humanoid.Jump = true
+			end
+
+			if not safeMoveTo(targetPos, 2.5) then
+				return false
+			end
+		end
+
+		return true
+	end
+
+	return false
+end
+
+-- ================= FARM LOOP =================
+task.spawn(function()
+	local lockedTarget: Instance?
+	local targetStart = 0
+	local lastPos: Vector3?
+	local lastMove = 0
+
+	while true do
+		task.wait(0.05)
+
+		local ok, err = pcall(function()
+			if not autoFarm or not humanoid or not rootPart then
+				lockedTarget = nil
+				return
+			end
+
+			refreshCoins()
+
+			if not lockedTarget or isBlacklisted(lockedTarget) then
+				lockedTarget = getNearestCoin()
+				if not lockedTarget then return end
+				targetStart = os.clock()
+				lastPos = rootPart.Position
+				lastMove = os.clock()
+			end
+
+			local coin = lockedTarget
+			if not coin then return end
+
+			if os.clock() - targetStart > MAX_TARGET_TIME then
+				coinBlacklist[coin] = os.clock() + blacklistDuration
+				lockedTarget = nil
+				return
+			end
+
+			if lastPos and (rootPart.Position - lastPos).Magnitude > STUCK_DISTANCE then
+				lastPos = rootPart.Position
+				lastMove = os.clock()
+			elseif os.clock() - lastMove > STUCK_TIME then
+				if tpIfStuck then
+					rootPart.CFrame = CFrame.new(getPos(coin))
+				end
+				coinBlacklist[coin] = os.clock() + blacklistDuration
+				lockedTarget = nil
+				return
+			end
+
+			local path
+			if moveMode == "Pathfinding" then
+				path = computePath(rootPart.Position, getPos(coin))
+
+				-- fallback chute volontaire
+				if not path and shouldForceDrop(getPos(coin)) then
+					humanoid:MoveTo(getPos(coin))
+					return
+				end
+
+				if not path then
+					coinBlacklist[coin] = os.clock() + 2
+					lockedTarget = nil
+					return
+				end
+
+			end
+
+			moveTo(getPos(coin), path)
+			coinBlacklist[coin] = os.clock() + blacklistDuration
+			lockedTarget = nil
+
+			if postCollectDelay > 0 then
+				task.wait(postCollectDelay)
+			end
+		end)
+
+		if not ok then
+			warn("Autofarm error:", err)
+			task.wait(0.5)
+		end
+	end
+end)
+
+-- ================= GUI =================
+local gui = Instance.new("ScreenGui")
+gui.ResetOnSpawn = false
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local main = Instance.new("Frame", gui)
+main.Size = UDim2.fromScale(0.35, 0.45)
+main.Position = UDim2.fromScale(0.03, 0.25)
+main.BackgroundColor3 = Color3.fromRGB(25,25,25)
+main.Active = true
+main.Draggable = true
+
+-- Tabs
+local tabBar = Instance.new("Frame", main)
+tabBar.Size = UDim2.fromScale(1, 0.08)
+tabBar.Position = UDim2.fromScale(0,0)
+tabBar.BackgroundTransparency = 1
+
+local farmTabBtn = Instance.new("TextButton", tabBar)
+farmTabBtn.Size = UDim2.fromScale(0.48,1)
+farmTabBtn.Position = UDim2.fromScale(0,0)
+farmTabBtn.Text = "Farm"
+farmTabBtn.TextScaled = true
+
+local listTabBtn = Instance.new("TextButton", tabBar)
+listTabBtn.Size = UDim2.fromScale(0.48,1)
+listTabBtn.Position = UDim2.fromScale(0.52,0)
+listTabBtn.Text = "Liste"
+listTabBtn.TextScaled = true
+
+-- Farm Tab
+local farmTab = Instance.new("Frame", main)
+farmTab.Size = UDim2.fromScale(1,0.92)
+farmTab.Position = UDim2.fromScale(0,0.08)
+farmTab.BackgroundTransparency = 1
+
+local farmBtn = Instance.new("TextButton", farmTab)
+farmBtn.Size = UDim2.fromScale(0.9,0.12)
+farmBtn.Position = UDim2.fromScale(0.05,0.05)
+farmBtn.Text = "Auto Farm : OFF"
+farmBtn.TextScaled = true
+
+local modeBtn = Instance.new("TextButton", farmTab)
+modeBtn.Size = UDim2.fromScale(0.9,0.12)
+modeBtn.Position = UDim2.fromScale(0.05,0.2)
+modeBtn.Text = "Mode : Pathfinding"
+modeBtn.TextScaled = true
+
+-- Sliders for TweenSpeed
+local speedLabel = Instance.new("TextLabel", farmTab)
+speedLabel.Size = UDim2.fromScale(0.9,0.06)
+speedLabel.Position = UDim2.fromScale(0.05,0.35)
+speedLabel.Text = "Tween Speed: "..tweenSpeed
+speedLabel.TextScaled = true
+
+local speedBar = Instance.new("Frame", farmTab)
+speedBar.Size = UDim2.fromScale(0.9,0.03)
+speedBar.Position = UDim2.fromScale(0.05,0.42)
+speedBar.BackgroundColor3 = Color3.fromRGB(80,80,80)
+
+local speedFill = Instance.new("Frame", speedBar)
+speedFill.Size = UDim2.fromScale(0.3,1)
+speedFill.BackgroundColor3 = Color3.fromRGB(0,170,255)
+
+-- Delay slider
+local delayLabel = Instance.new("TextLabel", farmTab)
+delayLabel.Size = UDim2.fromScale(0.9,0.06)
+delayLabel.Position = UDim2.fromScale(0.05,0.48)
+delayLabel.Text = string.format("Delay: %.2fs", postCollectDelay)
+delayLabel.TextScaled = true
+
+local delayBar = Instance.new("Frame", farmTab)
+delayBar.Size = UDim2.fromScale(0.9,0.03)
+delayBar.Position = UDim2.fromScale(0.05,0.55)
+delayBar.BackgroundColor3 = Color3.fromRGB(80,80,80)
+
+local delayFill = Instance.new("Frame", delayBar)
+delayFill.Size = UDim2.fromScale(postCollectDelay,1)
+delayFill.BackgroundColor3 = Color3.fromRGB(255,170,0)
+
+-- Liste Tab
+local listTab = Instance.new("Frame", main)
+listTab.Size = UDim2.fromScale(1,0.92)
+listTab.Position = UDim2.fromScale(0,0.08)
+listTab.BackgroundTransparency = 1
+listTab.Visible = false
+
+local scrolling = Instance.new("ScrollingFrame", listTab)
+scrolling.Size = UDim2.fromScale(0.9,0.85)
+scrolling.Position = UDim2.fromScale(0.05,0.05)
+scrolling.BackgroundColor3 = Color3.fromRGB(30,30,30)
+scrolling.BorderSizePixel = 0
+scrolling.ScrollBarThickness = 6
+
+local layout = Instance.new("UIListLayout", scrolling)
+layout.Padding = UDim.new(0,6)
+
+-- ================= UI LOGIC =================
+farmTabBtn.MouseButton1Click:Connect(function()
+	farmTab.Visible = true
+	listTab.Visible = false
+end)
+
+listTabBtn.MouseButton1Click:Connect(function()
+	farmTab.Visible = false
+	listTab.Visible = true
+end)
+
+farmBtn.MouseButton1Click:Connect(function()
+	autoFarm = not autoFarm
+	farmBtn.Text = autoFarm and "Auto Farm : ON" or "Auto Farm : OFF"
+	if autoFarm then startFarm() else stopFarm() end
+end)
+
+modeBtn.MouseButton1Click:Connect(function()
+	moveMode = (moveMode == "Pathfinding" and "Walk") or (moveMode == "Walk" and "Tween") or "Pathfinding"
+	modeBtn.Text = "Mode : "..moveMode
+end)
+
+-- Slider logic
+local draggingSpeed, draggingDelay = false, false
+
+speedBar.InputBegan:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 then draggingSpeed = true end
+end)
+delayBar.InputBegan:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 then draggingDelay = true end
+end)
+UserInputService.InputEnded:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 then
+		draggingSpeed = false
+		draggingDelay = false
+	end
+end)
+
+RunService.RenderStepped:Connect(function()
+	if draggingSpeed then
+		local m = player:GetMouse()
+		local x = math.clamp((m.X - speedBar.AbsolutePosition.X)/speedBar.AbsoluteSize.X,0,1)
+		speedFill.Size = UDim2.fromScale(x,1)
+		tweenSpeed = math.floor(5 + x*45)
+		speedLabel.Text = "Tween Speed: "..tweenSpeed
+	end
+	if draggingDelay then
+		local m = player:GetMouse()
+		local x = math.clamp((m.X - delayBar.AbsolutePosition.X)/delayBar.AbsoluteSize.X,0,1)
+		delayFill.Size = UDim2.fromScale(x,1)
+		postCollectDelay = math.floor(x*2*100)/100
+		delayLabel.Text = string.format("Delay: %.2fs", postCollectDelay)
+	end
+end)
+
+-- ================= LIST LOOP =================
+task.spawn(function()
+	while true do
+		refreshCoins()
+		scrolling:ClearAllChildren()
+		for _, coin in ipairs(cachedCoins) do
+			local lbl = Instance.new("TextLabel")
+			lbl.Size = UDim2.new(1,-8,0,24)
+			lbl.BackgroundColor3 = Color3.fromRGB(45,45,45)
+			lbl.TextColor3 = isBlacklisted(coin) and Color3.fromRGB(150,150,150) or Color3.new(1,1,1)
+			lbl.TextScaled = true
+			lbl.Text = coin.Name
+			lbl.Parent = scrolling
+		end
+		task.wait(listRefreshInterval)
+	end
+end)
