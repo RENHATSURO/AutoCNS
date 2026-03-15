@@ -1,15 +1,3 @@
--- 🔐 WHITELIST DE USER IDS
-local Whitelist = {
-	[1] = true,
-	[2] = true,
-}
-
-game.Players.PlayerAdded:Connect(function(player)
-	if not Whitelist[player.UserId] then
-		player:Kick("This is a private script, You're not allowed in. Ask the owner for a whitelist.")
-	end
-end)
-
 --!strict
 -- ================= SERVICES =================
 local Players = game:GetService("Players")
