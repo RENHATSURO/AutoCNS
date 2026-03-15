@@ -1,3 +1,4 @@
+
 --!strict
 -- ================= SERVICES =================
 local Players = game:GetService("Players")
@@ -13,6 +14,7 @@ local scriptEnabled = true
 local autoFarm = false
 local moveMode = "Pathfinding" -- Pathfinding | Walk | Tween
 local tweenSpeed = 22
+local tweenYOffset = 0
 local postCollectDelay = 0
 local tpIfStuck = false
 local autoJumpEnabled = false
@@ -218,7 +220,8 @@ local function moveTo(target: Vector3, path: Path?): boolean
 		end
 		local dist = (rootPart.Position - target).Magnitude
 		local travelTime = math.max(dist / tweenSpeed, 0.05)
-		activeTween = TweenService:Create(rootPart, TweenInfo.new(travelTime, Enum.EasingStyle.Linear), { CFrame = CFrame.new(target) })
+		local tweenTarget = target + Vector3.new(0, tweenYOffset, 0)
+		activeTween = TweenService:Create(rootPart, TweenInfo.new(travelTime, Enum.EasingStyle.Linear), { CFrame = CFrame.new(tweenTarget) })
 		activeTween:Play()
 		activeTween.Completed:Wait()
 		return true
@@ -489,7 +492,7 @@ end
 
 local main = Instance.new("Frame")
 main.Name = "Main"
-main.Size = UDim2.fromOffset(460, 410)
+main.Size = UDim2.fromOffset(460, 470)
 main.Position = UDim2.fromScale(0.04, 0.2)
 main.BackgroundColor3 = BG_DARK
 main.BorderSizePixel = 0
@@ -665,6 +668,31 @@ delayFill.BackgroundColor3 = Color3.fromRGB(255, 170, 0)
 delayFill.BorderSizePixel = 0
 delayFill.Parent = delayBar
 Instance.new("UICorner", delayFill).CornerRadius = UDim.new(1, 0)
+
+local yOffsetLabel = Instance.new("TextLabel")
+yOffsetLabel.Size = UDim2.new(1, 0, 0, 24)
+yOffsetLabel.Position = UDim2.fromOffset(0, 298)
+yOffsetLabel.BackgroundTransparency = 1
+yOffsetLabel.Text = string.format("Tween Y Offset: %.2f", tweenYOffset)
+yOffsetLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
+yOffsetLabel.Font = Enum.Font.Gotham
+yOffsetLabel.TextScaled = true
+yOffsetLabel.Parent = farmTab
+
+local yOffsetBar = Instance.new("Frame")
+yOffsetBar.Size = UDim2.new(1, 0, 0, 10)
+yOffsetBar.Position = UDim2.fromOffset(0, 326)
+yOffsetBar.BackgroundColor3 = Color3.fromRGB(67, 72, 86)
+yOffsetBar.BorderSizePixel = 0
+yOffsetBar.Parent = farmTab
+Instance.new("UICorner", yOffsetBar).CornerRadius = UDim.new(1, 0)
+
+local yOffsetFill = Instance.new("Frame")
+yOffsetFill.Size = UDim2.fromScale(math.clamp((tweenYOffset + 7) / 14, 0, 1), 1)
+yOffsetFill.BackgroundColor3 = Color3.fromRGB(122, 195, 255)
+yOffsetFill.BorderSizePixel = 0
+yOffsetFill.Parent = yOffsetBar
+Instance.new("UICorner", yOffsetFill).CornerRadius = UDim.new(1, 0)
 
 local deathLabel = Instance.new("TextLabel")
 deathLabel.Size = UDim2.new(1, 0, 0, 34)
@@ -902,6 +930,7 @@ autoJumpBtn.MouseButton1Click:Connect(function()
 end)
 local draggingSpeed = false
 local draggingDelay = false
+local draggingYOffset = false
 
 speedBar.InputBegan:Connect(function(i)
 	if i.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -915,10 +944,17 @@ delayBar.InputBegan:Connect(function(i)
 	end
 end)
 
+yOffsetBar.InputBegan:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 then
+		draggingYOffset = true
+	end
+end)
+
 UserInputService.InputEnded:Connect(function(i)
 	if i.UserInputType == Enum.UserInputType.MouseButton1 then
 		draggingSpeed = false
 		draggingDelay = false
+		draggingYOffset = false
 	end
 end)
 
@@ -945,6 +981,17 @@ RunService.RenderStepped:Connect(function()
 		postCollectDelay = math.floor(x * 2 * 100) / 100
 
 		delayLabel.Text = string.format("Delay: %.2fs",postCollectDelay)
+	end
+
+	if draggingYOffset then
+		local m = player:GetMouse()
+		local x = math.clamp((m.X - yOffsetBar.AbsolutePosition.X) / yOffsetBar.AbsoluteSize.X, 0, 1)
+
+		local rawOffset = -7 + x * 14
+		tweenYOffset = math.clamp(math.floor(rawOffset / 0.05 + 0.5) * 0.05, -7, 7)
+		yOffsetFill.Size = UDim2.fromScale((tweenYOffset + 7) / 14, 1)
+
+		yOffsetLabel.Text = string.format("Tween Y Offset: %.2f", tweenYOffset)
 	end
 end)
 
