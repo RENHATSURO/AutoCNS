@@ -1,4 +1,3 @@
-
 --!strict
 -- ================= SERVICES =================
 local Players = game:GetService("Players")
@@ -6,6 +5,7 @@ local PathfindingService = game:GetService("PathfindingService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
 
@@ -19,6 +19,7 @@ local postCollectDelay = 0
 local tpIfStuck = false
 local autoJumpEnabled = false
 local autoWalkIfIdleEnabled = false
+local autoResetOnFullBag = false   -- [NEW] kill on full bag
 
 local DROP_HEIGHT_ALLOW = 6
 local DROP_CHECK_DISTANCE = 6
@@ -93,9 +94,7 @@ local coinBlacklist: { [Instance]: number } = {}
 
 local function isBlacklisted(coin: Instance): boolean
 	local t = coinBlacklist[coin]
-	if not t then
-		return false
-	end
+	if not t then return false end
 	if os.clock() > t then
 		coinBlacklist[coin] = nil
 		return false
@@ -104,9 +103,7 @@ local function isBlacklisted(coin: Instance): boolean
 end
 
 local function getPos(obj: Instance): Vector3
-	if obj:IsA("BasePart") then
-		return obj.Position
-	end
+	if obj:IsA("BasePart") then return obj.Position end
 	return obj:GetPivot().Position
 end
 
@@ -120,11 +117,8 @@ local function refreshCoins()
 end
 
 local function getNearestCoin(): Instance?
-	if not rootPart then
-		return nil
-	end
+	if not rootPart then return nil end
 	local best, bestDist = nil, math.huge
-
 	for _, coin in ipairs(cachedCoins) do
 		if not isBlacklisted(coin) then
 			local d = (getPos(coin) - rootPart.Position).Magnitude
@@ -140,9 +134,7 @@ end
 -- ================= PATH =================
 local function computePath(from: Vector3, to: Vector3): Path?
 	local dist = (to - from).Magnitude
-	if dist > MAX_PATH_DISTANCE then
-		return nil
-	end
+	if dist > MAX_PATH_DISTANCE then return nil end
 
 	local ok, path = pcall(function()
 		local p = PathfindingService:CreatePath({
@@ -154,28 +146,18 @@ local function computePath(from: Vector3, to: Vector3): Path?
 			WaypointSpacing = 2,
 		})
 		p:ComputeAsync(from, to)
-		if p.Status == Enum.PathStatus.Success then
-			return p
-		end
+		if p.Status == Enum.PathStatus.Success then return p end
 		return nil
 	end)
 
-	if not ok then
-		return nil
-	end
-
+	if not ok then return nil end
 	return path
 end
 
 local function shouldForceDrop(targetPos: Vector3): boolean
-	if not rootPart then
-		return false
-	end
-
+	if not rootPart then return false end
 	local heightDiff = rootPart.Position.Y - targetPos.Y
-	if heightDiff < DROP_HEIGHT_ALLOW then
-		return false
-	end
+	if heightDiff < DROP_HEIGHT_ALLOW then return false end
 
 	local localRay = RaycastParams.new()
 	localRay.FilterDescendantsInstances = { player.Character }
@@ -189,24 +171,30 @@ end
 
 -- ================= MOVEMENT =================
 local activeTween: Tween?
+local activePlatformTween: Tween?   -- [FIX] separate tween for platform
 local tweenPlatform: Part?
 local TWEEN_PLATFORM_SIZE = Vector3.new(6, 1, 6)
 local TWEEN_PLATFORM_COLOR = Color3.fromRGB(57, 255, 20)
 
 local function destroyTweenPlatform()
+	if activePlatformTween then
+		activePlatformTween:Cancel()
+		activePlatformTween = nil
+	end
 	if tweenPlatform then
 		tweenPlatform:Destroy()
 		tweenPlatform = nil
 	end
 end
 
-local function getTweenPlatformPosition(): Vector3?
-	if not rootPart or not humanoid then
-		return nil
-	end
+local function getUnderFeetOffset(): number
+	if not humanoid or not rootPart then return 3 end
+	return humanoid.HipHeight + (rootPart.Size.Y * 0.5) + 0.5
+end
 
-	local underFeetOffset = humanoid.HipHeight + (rootPart.Size.Y * 0.5) + 0.5
-	return rootPart.Position - Vector3.new(0, underFeetOffset, 0)
+local function getTweenPlatformPosition(): Vector3?
+	if not rootPart or not humanoid then return nil end
+	return rootPart.Position - Vector3.new(0, getUnderFeetOffset(), 0)
 end
 
 local function ensureTweenPlatform()
@@ -236,47 +224,68 @@ local function ensureTweenPlatform()
 		tweenPlatform = part
 	end
 
-	local platformPosition = getTweenPlatformPosition()
-	if platformPosition then
-		tweenPlatform.CFrame = CFrame.new(platformPosition)
+	-- Only update position when NOT in the middle of a tween
+	-- (during tween, the platform is driven by activePlatformTween)
+	if not activePlatformTween or activePlatformTween.PlaybackState ~= Enum.PlaybackState.Playing then
+		local platformPosition = getTweenPlatformPosition()
+		if platformPosition then
+			tweenPlatform.CFrame = CFrame.new(platformPosition)
+		end
 	end
 end
 
 local function safeMoveTo(pos: Vector3, timeout: number): boolean
-	if not humanoid or not rootPart then
-		return false
-	end
-
+	if not humanoid or not rootPart then return false end
 	humanoid:MoveTo(pos)
 	local start = os.clock()
 	while os.clock() - start < timeout do
-		if not scriptEnabled or not autoFarm then
-			return false
-		end
-		if (rootPart.Position - pos).Magnitude < 4 then
-			return true
-		end
+		if not scriptEnabled or not autoFarm then return false end
+		if (rootPart.Position - pos).Magnitude < 4 then return true end
 		task.wait(0.05)
 	end
 	return false
 end
 
 local function moveTo(target: Vector3, path: Path?): boolean
-	if not humanoid or not rootPart then
-		return false
-	end
+	if not humanoid or not rootPart then return false end
 
 	if moveMode == "Tween" then
 		ensureTweenPlatform()
-		if activeTween then
-			activeTween:Cancel()
-		end
+		if activeTween then activeTween:Cancel() end
+		if activePlatformTween then activePlatformTween:Cancel() end
+
 		local dist = (rootPart.Position - target).Magnitude
 		local travelTime = math.max(dist / tweenSpeed, 0.05)
 		local tweenTarget = target + Vector3.new(0, tweenYOffset, 0)
-		activeTween = TweenService:Create(rootPart, TweenInfo.new(travelTime, Enum.EasingStyle.Linear), { CFrame = CFrame.new(tweenTarget) })
+
+		-- [FIX] Tween the platform to its target position simultaneously
+		-- so it follows the character even when moving upward
+		if tweenPlatform then
+			local platformTarget = tweenTarget - Vector3.new(0, getUnderFeetOffset(), 0)
+			activePlatformTween = TweenService:Create(
+				tweenPlatform,
+				TweenInfo.new(travelTime, Enum.EasingStyle.Linear),
+				{ CFrame = CFrame.new(platformTarget) }
+			)
+			activePlatformTween:Play()
+		end
+
+		activeTween = TweenService:Create(
+			rootPart,
+			TweenInfo.new(travelTime, Enum.EasingStyle.Linear),
+			{ CFrame = CFrame.new(tweenTarget) }
+		)
 		activeTween:Play()
 		activeTween.Completed:Wait()
+
+		-- Snap platform after tween ends to stay perfectly aligned
+		if tweenPlatform then
+			local finalPos = getTweenPlatformPosition()
+			if finalPos then
+				tweenPlatform.CFrame = CFrame.new(finalPos)
+			end
+		end
+
 		return true
 	end
 
@@ -287,10 +296,7 @@ local function moveTo(target: Vector3, path: Path?): boolean
 	if moveMode == "Pathfinding" and path then
 		local waypoints = path:GetWaypoints()
 		for i, wp in ipairs(waypoints) do
-			if not scriptEnabled or not autoFarm then
-				return false
-			end
-
+			if not scriptEnabled or not autoFarm then return false end
 			local targetPos = wp.Position
 			if i < #waypoints then
 				local nextPos = waypoints[i + 1].Position
@@ -299,14 +305,10 @@ local function moveTo(target: Vector3, path: Path?): boolean
 					targetPos += delta.Unit * 1.5
 				end
 			end
-
 			if wp.Action == Enum.PathWaypointAction.Jump then
 				humanoid.Jump = true
 			end
-
-			if not safeMoveTo(targetPos, 2.5) then
-				return false
-			end
+			if not safeMoveTo(targetPos, 2.5) then return false end
 		end
 		return true
 	end
@@ -319,7 +321,6 @@ RunService.RenderStepped:Connect(function()
 		destroyTweenPlatform()
 		return
 	end
-
 	if moveMode == "Tween" then
 		ensureTweenPlatform()
 	else
@@ -329,22 +330,11 @@ end)
 
 -- ================= AUTO JUMP LOOP =================
 RunService.RenderStepped:Connect(function()
-	if not scriptEnabled or not autoJumpEnabled then
-		return
-	end
-	if not humanoid or not rootPart then
-		return
-	end
-
-	if humanoid:GetState() == Enum.HumanoidStateType.Climbing then
-		return
-	end
-	if tick() - lastJump < JUMP_COOLDOWN then
-		return
-	end
-	if humanoid.FloorMaterial == Enum.Material.Air then
-		return
-	end
+	if not scriptEnabled or not autoJumpEnabled then return end
+	if not humanoid or not rootPart then return end
+	if humanoid:GetState() == Enum.HumanoidStateType.Climbing then return end
+	if tick() - lastJump < JUMP_COOLDOWN then return end
+	if humanoid.FloorMaterial == Enum.Material.Air then return end
 
 	local rayOrigin = rootPart.Position + Vector3.new(0, RAY_HEIGHT_OFFSET, 0)
 	local rayDirection = rootPart.CFrame.LookVector * RAY_DISTANCE
@@ -367,9 +357,7 @@ local function getRandomDirection()
 end
 
 local function isWallAhead(direction: Vector3): boolean
-	if not rootPart then
-		return false
-	end
+	if not rootPart then return false end
 	local result = workspace:Raycast(rootPart.Position, direction.Unit * WALL_DETECTION_DISTANCE, rayParams)
 	return result ~= nil and result.Instance ~= nil and result.Instance.CanCollide
 end
@@ -378,18 +366,12 @@ RunService.Heartbeat:Connect(function(dt)
 	if not scriptEnabled or not autoWalkIfIdleEnabled then
 		idleTimer = 0
 		isAutoMoving = false
-		if rootPart then
-			lastPosition = rootPart.Position
-		end
+		if rootPart then lastPosition = rootPart.Position end
 		return
 	end
-	if not humanoid or not rootPart then
-		return
-	end
+	if not humanoid or not rootPart then return end
 
-	if not lastPosition then
-		lastPosition = rootPart.Position
-	end
+	if not lastPosition then lastPosition = rootPart.Position end
 
 	if (rootPart.Position - lastPosition).Magnitude > POSITION_EPSILON then
 		idleTimer = 0
@@ -403,23 +385,54 @@ RunService.Heartbeat:Connect(function(dt)
 		isAutoMoving = true
 		idleTimer = 0
 		task.spawn(function()
-			if not humanoid or not rootPart then
-				isAutoMoving = false
-				return
-			end
+			if not humanoid or not rootPart then isAutoMoving = false return end
 			local direction = getRandomDirection()
 			for _ = 1, 8 do
-				if not isWallAhead(direction) then
-					break
-				end
+				if not isWallAhead(direction) then break end
 				direction = getRandomDirection()
 			end
-
 			humanoid:MoveTo(rootPart.Position + direction.Unit * MOVE_DISTANCE)
 			humanoid.MoveToFinished:Wait()
 			isAutoMoving = false
 		end)
 	end
+end)
+
+-- ================= [NEW] AUTO RESET ON FULL BAG =================
+local bagResetDebounce = false
+
+task.spawn(function()
+	-- Wait for the remote to exist before connecting
+	local ok, coinEvent = pcall(function()
+		return ReplicatedStorage
+			:WaitForChild("Remotes", 10)
+			:WaitForChild("Gameplay", 10)
+			:WaitForChild("CoinCollected", 10)
+	end)
+
+	if not ok or not coinEvent then
+		warn("AutoCNS: CoinCollected remote not found – Auto Reset feature disabled.")
+		return
+	end
+
+	coinEvent.OnClientEvent:Connect(function(bagName, current, max)
+		if not autoResetOnFullBag then return end
+		if bagResetDebounce then return end
+
+		local isFull = current >= max
+		if not isFull then return end
+
+		bagResetDebounce = true
+
+		local char = player.Character or player.CharacterAdded:Wait()
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.Health = 0
+		end
+
+		task.wait(5)
+		bagResetDebounce = false
+	end)
 end)
 
 -- ================= FARM LOOP =================
@@ -442,18 +455,14 @@ task.spawn(function()
 
 			if not lockedTarget or isBlacklisted(lockedTarget) then
 				lockedTarget = getNearestCoin()
-				if not lockedTarget then
-					return
-				end
+				if not lockedTarget then return end
 				targetStart = os.clock()
 				localLastPos = rootPart.Position
 				lastMove = os.clock()
 			end
 
 			local coin = lockedTarget
-			if not coin then
-				return
-			end
+			if not coin then return end
 
 			if os.clock() - targetStart > MAX_TARGET_TIME then
 				coinBlacklist[coin] = os.clock() + blacklistDuration
@@ -491,9 +500,7 @@ task.spawn(function()
 			coinBlacklist[coin] = os.clock() + blacklistDuration
 			lockedTarget = nil
 
-			if postCollectDelay > 0 then
-				task.wait(postCollectDelay)
-			end
+			if postCollectDelay > 0 then task.wait(postCollectDelay) end
 		end)
 
 		if not ok then
@@ -531,34 +538,28 @@ local function attachButtonFx(btn: TextButton, baseColor: Color3, hoverColor: Co
 			Size = UDim2.new(originalSize.X.Scale, originalSize.X.Offset, originalSize.Y.Scale, originalSize.Y.Offset + 2),
 		})
 	end)
-
 	btn.MouseLeave:Connect(function()
 		tween(btn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
 			BackgroundColor3 = baseColor,
 			Size = originalSize,
 		})
 	end)
-
 	btn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			tween(btn, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-				BackgroundColor3 = pressColor,
-			})
+			tween(btn, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundColor3 = pressColor })
 		end
 	end)
-
 	btn.InputEnded:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			tween(btn, TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-				BackgroundColor3 = hoverColor,
-			})
+			tween(btn, TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundColor3 = hoverColor })
 		end
 	end)
 end
 
+-- Main frame – 42px taller to accommodate new button
 local main = Instance.new("Frame")
 main.Name = "Main"
-main.Size = UDim2.fromOffset(460, 470)
+main.Size = UDim2.fromOffset(460, 512)
 main.Position = UDim2.fromScale(0.04, 0.2)
 main.BackgroundColor3 = BG_DARK
 main.BorderSizePixel = 0
@@ -679,15 +680,20 @@ local function makeButton(parent: Instance, y: number, text: string, baseColor: 
 	return btn
 end
 
-local farmBtn = makeButton(farmTab, 0, "Auto Farm: OFF")
-local modeBtn = makeButton(farmTab, 42, "Mode: Pathfinding")
-local tpBtn = makeButton(farmTab, 84, "TP If Stuck: OFF")
-local autoWalkBtn = makeButton(farmTab, 126, "Auto Walk If Idle: OFF")
-local autoJumpBtn = makeButton(farmTab, 168, "Auto Jump: OFF")
+-- Buttons (same positions, new one inserted at y=210, sliders shifted +42)
+local farmBtn        = makeButton(farmTab,  0,   "Auto Farm: OFF")
+local modeBtn        = makeButton(farmTab,  42,  "Mode: Pathfinding")
+local tpBtn          = makeButton(farmTab,  84,  "TP If Stuck: OFF")
+local autoWalkBtn    = makeButton(farmTab, 126,  "Auto Walk If Idle: OFF")
+local autoJumpBtn    = makeButton(farmTab, 168,  "Auto Jump: OFF")
+-- [NEW] Auto reset button
+local autoResetBtn   = makeButton(farmTab, 210,  "Auto Reset (Full Bag): OFF",
+	Color3.fromRGB(45, 50, 62), Color3.fromRGB(58, 66, 82), Color3.fromRGB(35, 40, 52))
 
+-- Sliders shifted down by 42 to make room for the new button
 local speedLabel = Instance.new("TextLabel")
 speedLabel.Size = UDim2.new(1, 0, 0, 24)
-speedLabel.Position = UDim2.fromOffset(0, 214)
+speedLabel.Position = UDim2.fromOffset(0, 256)
 speedLabel.BackgroundTransparency = 1
 speedLabel.Text = "Tween Speed: " .. tweenSpeed
 speedLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
@@ -697,7 +703,7 @@ speedLabel.Parent = farmTab
 
 local speedBar = Instance.new("Frame")
 speedBar.Size = UDim2.new(1, 0, 0, 10)
-speedBar.Position = UDim2.fromOffset(0, 242)
+speedBar.Position = UDim2.fromOffset(0, 284)
 speedBar.BackgroundColor3 = Color3.fromRGB(67, 72, 86)
 speedBar.BorderSizePixel = 0
 speedBar.Parent = farmTab
@@ -712,7 +718,7 @@ Instance.new("UICorner", speedFill).CornerRadius = UDim.new(1, 0)
 
 local delayLabel = Instance.new("TextLabel")
 delayLabel.Size = UDim2.new(1, 0, 0, 24)
-delayLabel.Position = UDim2.fromOffset(0, 256)
+delayLabel.Position = UDim2.fromOffset(0, 298)
 delayLabel.BackgroundTransparency = 1
 delayLabel.Text = string.format("Delay: %.2fs", postCollectDelay)
 delayLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
@@ -722,7 +728,7 @@ delayLabel.Parent = farmTab
 
 local delayBar = Instance.new("Frame")
 delayBar.Size = UDim2.new(1, 0, 0, 10)
-delayBar.Position = UDim2.fromOffset(0, 284)
+delayBar.Position = UDim2.fromOffset(0, 326)
 delayBar.BackgroundColor3 = Color3.fromRGB(67, 72, 86)
 delayBar.BorderSizePixel = 0
 delayBar.Parent = farmTab
@@ -737,7 +743,7 @@ Instance.new("UICorner", delayFill).CornerRadius = UDim.new(1, 0)
 
 local yOffsetLabel = Instance.new("TextLabel")
 yOffsetLabel.Size = UDim2.new(1, 0, 0, 24)
-yOffsetLabel.Position = UDim2.fromOffset(0, 298)
+yOffsetLabel.Position = UDim2.fromOffset(0, 340)
 yOffsetLabel.BackgroundTransparency = 1
 yOffsetLabel.Text = string.format("Tween Y Offset: %.2f", tweenYOffset)
 yOffsetLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
@@ -747,7 +753,7 @@ yOffsetLabel.Parent = farmTab
 
 local yOffsetBar = Instance.new("Frame")
 yOffsetBar.Size = UDim2.new(1, 0, 0, 10)
-yOffsetBar.Position = UDim2.fromOffset(0, 326)
+yOffsetBar.Position = UDim2.fromOffset(0, 368)
 yOffsetBar.BackgroundColor3 = Color3.fromRGB(67, 72, 86)
 yOffsetBar.BorderSizePixel = 0
 yOffsetBar.Parent = farmTab
@@ -760,6 +766,7 @@ yOffsetFill.BorderSizePixel = 0
 yOffsetFill.Parent = yOffsetBar
 Instance.new("UICorner", yOffsetFill).CornerRadius = UDim.new(1, 0)
 
+-- Stats tab
 local deathLabel = Instance.new("TextLabel")
 deathLabel.Size = UDim2.new(1, 0, 0, 34)
 deathLabel.Position = UDim2.fromOffset(0, 0)
@@ -792,7 +799,8 @@ uptimeStroke.Color = Color3.fromRGB(88, 98, 122)
 uptimeStroke.Transparency = 0.5
 uptimeStroke.Parent = uptimeLabel
 
-local killBtn = makeButton(statsTab, 260, "Kill Script", Color3.fromRGB(110, 45, 45), Color3.fromRGB(132, 58, 58), Color3.fromRGB(92, 35, 35))
+local killBtn = makeButton(statsTab, 260, "Kill Script",
+	Color3.fromRGB(110, 45, 45), Color3.fromRGB(132, 58, 58), Color3.fromRGB(92, 35, 35))
 
 local confirm = Instance.new("Frame")
 confirm.Size = UDim2.fromOffset(260, 120)
@@ -859,7 +867,8 @@ local function setMinimized(minimized: boolean)
 	tabBar.Visible = not minimized
 	confirm.Visible = false
 	if minimized then
-		tween(main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = UDim2.new(fullSize.X.Scale, fullSize.X.Offset, 0, topBar.Size.Y.Offset) })
+		tween(main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Size = UDim2.new(fullSize.X.Scale, fullSize.X.Offset, 0, topBar.Size.Y.Offset) })
 		minBtn.Text = "+"
 	else
 		tween(main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = fullSize })
@@ -870,9 +879,7 @@ end
 local function hideMainToTiny()
 	tween(main, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { BackgroundTransparency = 1 })
 	task.delay(0.16, function()
-		if not scriptEnabled then
-			return
-		end
+		if not scriptEnabled then return end
 		main.Visible = false
 		main.BackgroundTransparency = 0
 	end)
@@ -886,7 +893,6 @@ local function showMainFromTiny()
 	tinyToggle.Visible = false
 end
 
--- custom dragging (top bar + tiny menu)
 local function makeDraggable(handle: GuiObject, target: GuiObject)
 	local dragging = false
 	local dragStart: Vector2
@@ -898,20 +904,14 @@ local function makeDraggable(handle: GuiObject, target: GuiObject)
 			dragStart = input.Position
 			startPos = target.Position
 			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-				end
+				if input.UserInputState == Enum.UserInputState.End then dragging = false end
 			end)
 		end
 	end)
 
 	UserInputService.InputChanged:Connect(function(input)
-		if not dragging then
-			return
-		end
-		if input.UserInputType ~= Enum.UserInputType.MouseMovement then
-			return
-		end
+		if not dragging then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
 		local delta = input.Position - dragStart
 		target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 	end)
@@ -933,15 +933,11 @@ end
 local function bindTabHover(btn: TextButton, tabName: string)
 	btn.AutoButtonColor = false
 	btn.MouseEnter:Connect(function()
-		if activeTab == tabName then
-			return
-		end
+		if activeTab == tabName then return end
 		tween(btn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundColor3 = BTN_HOVER })
 	end)
 	btn.MouseLeave:Connect(function()
-		if activeTab == tabName then
-			return
-		end
+		if activeTab == tabName then return end
 		tween(btn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundColor3 = BTN_BASE })
 	end)
 	btn.InputBegan:Connect(function(input)
@@ -953,7 +949,6 @@ end
 
 bindTabHover(farmTabBtn, "Farm")
 bindTabHover(statsTabBtn, "Stats")
-
 setActiveTabButton(farmTabBtn, statsTabBtn)
 
 farmTabBtn.MouseButton1Click:Connect(function()
@@ -999,26 +994,25 @@ autoJumpBtn.MouseButton1Click:Connect(function()
 	autoJumpEnabled = not autoJumpEnabled
 	autoJumpBtn.Text = autoJumpEnabled and "Auto Jump: ON" or "Auto Jump: OFF"
 end)
+
+-- [NEW] Auto reset toggle
+autoResetBtn.MouseButton1Click:Connect(function()
+	autoResetOnFullBag = not autoResetOnFullBag
+	autoResetBtn.Text = autoResetOnFullBag and "Auto Reset (Full Bag): ON" or "Auto Reset (Full Bag): OFF"
+end)
+
 local draggingSpeed = false
 local draggingDelay = false
 local draggingYOffset = false
 
 speedBar.InputBegan:Connect(function(i)
-	if i.UserInputType == Enum.UserInputType.MouseButton1 then
-		draggingSpeed = true
-	end
+	if i.UserInputType == Enum.UserInputType.MouseButton1 then draggingSpeed = true end
 end)
-
 delayBar.InputBegan:Connect(function(i)
-	if i.UserInputType == Enum.UserInputType.MouseButton1 then
-		draggingDelay = true
-	end
+	if i.UserInputType == Enum.UserInputType.MouseButton1 then draggingDelay = true end
 end)
-
 yOffsetBar.InputBegan:Connect(function(i)
-	if i.UserInputType == Enum.UserInputType.MouseButton1 then
-		draggingYOffset = true
-	end
+	if i.UserInputType == Enum.UserInputType.MouseButton1 then draggingYOffset = true end
 end)
 
 UserInputService.InputEnded:Connect(function(i)
@@ -1030,77 +1024,53 @@ UserInputService.InputEnded:Connect(function(i)
 end)
 
 RunService.RenderStepped:Connect(function()
-	if not scriptEnabled then
-		return
-	end
+	if not scriptEnabled then return end
 
 	if draggingSpeed then
 		local m = player:GetMouse()
 		local x = math.clamp((m.X - speedBar.AbsolutePosition.X) / speedBar.AbsoluteSize.X, 0, 1)
-
-		speedFill.Size = UDim2.fromScale(x,1)
+		speedFill.Size = UDim2.fromScale(x, 1)
 		tweenSpeed = math.floor(5 + x * 45)
-
-		speedLabel.Text = "Tween Speed: "..tweenSpeed
+		speedLabel.Text = "Tween Speed: " .. tweenSpeed
 	end
 
 	if draggingDelay then
 		local m = player:GetMouse()
 		local x = math.clamp((m.X - delayBar.AbsolutePosition.X) / delayBar.AbsoluteSize.X, 0, 1)
-
-		delayFill.Size = UDim2.fromScale(x,1)
+		delayFill.Size = UDim2.fromScale(x, 1)
 		postCollectDelay = math.floor(x * 2 * 100) / 100
-
-		delayLabel.Text = string.format("Delay: %.2fs",postCollectDelay)
+		delayLabel.Text = string.format("Delay: %.2fs", postCollectDelay)
 	end
 
 	if draggingYOffset then
 		local m = player:GetMouse()
 		local x = math.clamp((m.X - yOffsetBar.AbsolutePosition.X) / yOffsetBar.AbsoluteSize.X, 0, 1)
-
 		local rawOffset = -7 + x * 14
 		tweenYOffset = math.clamp(math.floor(rawOffset / 0.05 + 0.5) * 0.05, -7, 7)
 		yOffsetFill.Size = UDim2.fromScale((tweenYOffset + 7) / 14, 1)
-
 		yOffsetLabel.Text = string.format("Tween Y Offset: %.2f", tweenYOffset)
 	end
 end)
 
-minBtn.MouseButton1Click:Connect(function()
-	setMinimized(not isMinimized)
-end)
-
-hideBtn.MouseButton1Click:Connect(function()
-	hideMainToTiny()
-end)
-
-tinyToggle.MouseButton1Click:Connect(function()
-	showMainFromTiny()
-end)
+minBtn.MouseButton1Click:Connect(function() setMinimized(not isMinimized) end)
+hideBtn.MouseButton1Click:Connect(function() hideMainToTiny() end)
+tinyToggle.MouseButton1Click:Connect(function() showMainFromTiny() end)
 
 local function shutdownScript()
 	scriptEnabled = false
 	autoFarm = false
 	autoJumpEnabled = false
 	autoWalkIfIdleEnabled = false
+	autoResetOnFullBag = false
 
-	if activeTween then
-		activeTween:Cancel()
-	end
-
+	if activeTween then activeTween:Cancel() end
+	if activePlatformTween then activePlatformTween:Cancel() end
 	destroyTweenPlatform()
-
 	gui.Enabled = false
 end
 
-killBtn.MouseButton1Click:Connect(function()
-	confirm.Visible = true
-end)
-
-noBtn.MouseButton1Click:Connect(function()
-	confirm.Visible = false
-end)
-
+killBtn.MouseButton1Click:Connect(function() confirm.Visible = true end)
+noBtn.MouseButton1Click:Connect(function() confirm.Visible = false end)
 yesBtn.MouseButton1Click:Connect(function()
 	confirm.Visible = false
 	shutdownScript()
@@ -1110,15 +1080,12 @@ local startTime = os.clock()
 
 task.spawn(function()
 	while scriptEnabled do
-		deathLabel.Text = "Deaths: "..tostring(deathCount)
-
+		deathLabel.Text = "Deaths: " .. tostring(deathCount)
 		local elapsed = math.floor(os.clock() - startTime)
 		local h = math.floor(elapsed / 3600)
 		local m = math.floor((elapsed % 3600) / 60)
 		local s = elapsed % 60
-
-		uptimeLabel.Text = string.format("Uptime: %02d:%02d:%02d",h,m,s)
-
+		uptimeLabel.Text = string.format("Uptime: %02d:%02d:%02d", h, m, s)
 		task.wait(1)
 	end
 end)
