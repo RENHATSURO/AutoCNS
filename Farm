@@ -6,9 +6,9 @@ local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
+ 
 local player = Players.LocalPlayer
-
+ 
 -- ================= SETTINGS =================
 local scriptEnabled = true
 local autoFarm = false
@@ -19,43 +19,44 @@ local postCollectDelay = 0
 local tpIfStuck = false
 local autoJumpEnabled = false
 local autoWalkIfIdleEnabled = false
-local autoResetOnFullBag = false   -- [NEW] kill on full bag
-
+local autoResetOnFullBag = false   -- kill on full bag
+local noclipEnabled = false        -- noclip toggle
+ 
 local DROP_HEIGHT_ALLOW = 6
 local DROP_CHECK_DISTANCE = 6
 local blacklistDuration = 6
-
+ 
 local MAX_PATH_DISTANCE = 300
 local LOBBY_IGNORE_DISTANCE = 500
 local MAX_TARGET_TIME = 6
 local STUCK_DISTANCE = 1.5
 local STUCK_TIME = 1.2
-
+ 
 -- Auto jump settings
 local RAY_DISTANCE = 4
 local RAY_HEIGHT_OFFSET = -1
 local JUMP_COOLDOWN = 0.5
 local lastJump = 0
-
+ 
 -- Auto walk if idle settings
 local IDLE_TIME = 5
 local MOVE_DISTANCE = 10
 local WALL_DETECTION_DISTANCE = 3
 local POSITION_EPSILON = 0.15
-
+ 
 local listRefreshInterval = 1
-
+ 
 -- ================= CHARACTER =================
 local humanoid: Humanoid?
 local rootPart: BasePart?
 local deathCount = 0
 local characterDiedConnection: RBXScriptConnection?
-
+ 
 local function bindCharacter(char: Model)
 	humanoid = char:WaitForChild("Humanoid") :: Humanoid
 	rootPart = char:WaitForChild("HumanoidRootPart") :: BasePart
 	lastJump = 0
-
+ 
 	if characterDiedConnection then
 		characterDiedConnection:Disconnect()
 	end
@@ -63,35 +64,35 @@ local function bindCharacter(char: Model)
 		deathCount += 1
 	end)
 end
-
+ 
 if player.Character then
 	bindCharacter(player.Character)
 end
-
+ 
 player.CharacterAdded:Connect(function(char)
 	task.wait(0.2)
 	bindCharacter(char)
 end)
-
+ 
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Blacklist
-
+ 
 local function updateRaycastFilter()
 	if player.Character then
 		rayParams.FilterDescendantsInstances = { player.Character }
 	end
 end
-
+ 
 updateRaycastFilter()
 player.CharacterAdded:Connect(function()
 	task.wait(0.2)
 	updateRaycastFilter()
 end)
-
+ 
 -- ================= COINS =================
 local cachedCoins: { Instance } = {}
 local coinBlacklist: { [Instance]: number } = {}
-
+ 
 local function isBlacklisted(coin: Instance): boolean
 	local t = coinBlacklist[coin]
 	if not t then return false end
@@ -101,12 +102,12 @@ local function isBlacklisted(coin: Instance): boolean
 	end
 	return true
 end
-
+ 
 local function getPos(obj: Instance): Vector3
 	if obj:IsA("BasePart") then return obj.Position end
 	return obj:GetPivot().Position
 end
-
+ 
 local function refreshCoins()
 	table.clear(cachedCoins)
 	for _, v in ipairs(workspace:GetDescendants()) do
@@ -115,7 +116,7 @@ local function refreshCoins()
 		end
 	end
 end
-
+ 
 local function getNearestCoin(): Instance?
 	if not rootPart then return nil end
 	local best, bestDist = nil, math.huge
@@ -130,12 +131,12 @@ local function getNearestCoin(): Instance?
 	end
 	return best
 end
-
+ 
 -- ================= PATH =================
 local function computePath(from: Vector3, to: Vector3): Path?
 	local dist = (to - from).Magnitude
 	if dist > MAX_PATH_DISTANCE then return nil end
-
+ 
 	local ok, path = pcall(function()
 		local p = PathfindingService:CreatePath({
 			AgentRadius = 1.8,
@@ -149,33 +150,33 @@ local function computePath(from: Vector3, to: Vector3): Path?
 		if p.Status == Enum.PathStatus.Success then return p end
 		return nil
 	end)
-
+ 
 	if not ok then return nil end
 	return path
 end
-
+ 
 local function shouldForceDrop(targetPos: Vector3): boolean
 	if not rootPart then return false end
 	local heightDiff = rootPart.Position.Y - targetPos.Y
 	if heightDiff < DROP_HEIGHT_ALLOW then return false end
-
+ 
 	local localRay = RaycastParams.new()
 	localRay.FilterDescendantsInstances = { player.Character }
 	localRay.FilterType = Enum.RaycastFilterType.Blacklist
-
+ 
 	local origin = rootPart.Position
 	local dir = rootPart.CFrame.LookVector * DROP_CHECK_DISTANCE
 	local result = workspace:Raycast(origin, dir, localRay)
 	return result == nil
 end
-
+ 
 -- ================= MOVEMENT =================
 local activeTween: Tween?
 local activePlatformTween: Tween?   -- [FIX] separate tween for platform
 local tweenPlatform: Part?
 local TWEEN_PLATFORM_SIZE = Vector3.new(6, 1, 6)
 local TWEEN_PLATFORM_COLOR = Color3.fromRGB(57, 255, 20)
-
+ 
 local function destroyTweenPlatform()
 	if activePlatformTween then
 		activePlatformTween:Cancel()
@@ -186,17 +187,17 @@ local function destroyTweenPlatform()
 		tweenPlatform = nil
 	end
 end
-
+ 
 local function getUnderFeetOffset(): number
 	if not humanoid or not rootPart then return 3 end
 	return humanoid.HipHeight + (rootPart.Size.Y * 0.5) + 0.5
 end
-
+ 
 local function getTweenPlatformPosition(): Vector3?
 	if not rootPart or not humanoid then return nil end
 	return rootPart.Position - Vector3.new(0, getUnderFeetOffset(), 0)
 end
-
+ 
 local function ensureTweenPlatform()
 	if moveMode ~= "Tween" then
 		destroyTweenPlatform()
@@ -206,7 +207,7 @@ local function ensureTweenPlatform()
 		destroyTweenPlatform()
 		return
 	end
-
+ 
 	if not tweenPlatform then
 		local part = Instance.new("Part")
 		part.Name = "TweenFloatPlatform"
@@ -223,7 +224,7 @@ local function ensureTweenPlatform()
 		part.Parent = workspace
 		tweenPlatform = part
 	end
-
+ 
 	-- Only update position when NOT in the middle of a tween
 	-- (during tween, the platform is driven by activePlatformTween)
 	if not activePlatformTween or activePlatformTween.PlaybackState ~= Enum.PlaybackState.Playing then
@@ -233,7 +234,7 @@ local function ensureTweenPlatform()
 		end
 	end
 end
-
+ 
 local function safeMoveTo(pos: Vector3, timeout: number): boolean
 	if not humanoid or not rootPart then return false end
 	humanoid:MoveTo(pos)
@@ -245,19 +246,19 @@ local function safeMoveTo(pos: Vector3, timeout: number): boolean
 	end
 	return false
 end
-
+ 
 local function moveTo(target: Vector3, path: Path?): boolean
 	if not humanoid or not rootPart then return false end
-
+ 
 	if moveMode == "Tween" then
 		ensureTweenPlatform()
 		if activeTween then activeTween:Cancel() end
 		if activePlatformTween then activePlatformTween:Cancel() end
-
+ 
 		local dist = (rootPart.Position - target).Magnitude
 		local travelTime = math.max(dist / tweenSpeed, 0.05)
 		local tweenTarget = target + Vector3.new(0, tweenYOffset, 0)
-
+ 
 		-- [FIX] Tween the platform to its target position simultaneously
 		-- so it follows the character even when moving upward
 		if tweenPlatform then
@@ -269,7 +270,7 @@ local function moveTo(target: Vector3, path: Path?): boolean
 			)
 			activePlatformTween:Play()
 		end
-
+ 
 		activeTween = TweenService:Create(
 			rootPart,
 			TweenInfo.new(travelTime, Enum.EasingStyle.Linear),
@@ -277,7 +278,7 @@ local function moveTo(target: Vector3, path: Path?): boolean
 		)
 		activeTween:Play()
 		activeTween.Completed:Wait()
-
+ 
 		-- Snap platform after tween ends to stay perfectly aligned
 		if tweenPlatform then
 			local finalPos = getTweenPlatformPosition()
@@ -285,14 +286,14 @@ local function moveTo(target: Vector3, path: Path?): boolean
 				tweenPlatform.CFrame = CFrame.new(finalPos)
 			end
 		end
-
+ 
 		return true
 	end
-
+ 
 	if moveMode == "Walk" then
 		return safeMoveTo(target, 2)
 	end
-
+ 
 	if moveMode == "Pathfinding" and path then
 		local waypoints = path:GetWaypoints()
 		for i, wp in ipairs(waypoints) do
@@ -312,10 +313,10 @@ local function moveTo(target: Vector3, path: Path?): boolean
 		end
 		return true
 	end
-
+ 
 	return false
 end
-
+ 
 RunService.RenderStepped:Connect(function()
 	if not scriptEnabled then
 		destroyTweenPlatform()
@@ -327,7 +328,7 @@ RunService.RenderStepped:Connect(function()
 		destroyTweenPlatform()
 	end
 end)
-
+ 
 -- ================= AUTO JUMP LOOP =================
 RunService.RenderStepped:Connect(function()
 	if not scriptEnabled or not autoJumpEnabled then return end
@@ -335,33 +336,33 @@ RunService.RenderStepped:Connect(function()
 	if humanoid:GetState() == Enum.HumanoidStateType.Climbing then return end
 	if tick() - lastJump < JUMP_COOLDOWN then return end
 	if humanoid.FloorMaterial == Enum.Material.Air then return end
-
+ 
 	local rayOrigin = rootPart.Position + Vector3.new(0, RAY_HEIGHT_OFFSET, 0)
 	local rayDirection = rootPart.CFrame.LookVector * RAY_DISTANCE
 	local result = workspace:Raycast(rayOrigin, rayDirection, rayParams)
-
+ 
 	if result and result.Instance and result.Instance.CanCollide then
 		humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
 		lastJump = tick()
 	end
 end)
-
+ 
 -- ================= AUTO WALK IF IDLE LOOP =================
 local idleTimer = 0
 local isAutoMoving = false
 local lastPosition: Vector3? = nil
-
+ 
 local function getRandomDirection()
 	local angle = math.random() * math.pi * 2
 	return Vector3.new(math.cos(angle), 0, math.sin(angle))
 end
-
+ 
 local function isWallAhead(direction: Vector3): boolean
 	if not rootPart then return false end
 	local result = workspace:Raycast(rootPart.Position, direction.Unit * WALL_DETECTION_DISTANCE, rayParams)
 	return result ~= nil and result.Instance ~= nil and result.Instance.CanCollide
 end
-
+ 
 RunService.Heartbeat:Connect(function(dt)
 	if not scriptEnabled or not autoWalkIfIdleEnabled then
 		idleTimer = 0
@@ -370,9 +371,9 @@ RunService.Heartbeat:Connect(function(dt)
 		return
 	end
 	if not humanoid or not rootPart then return end
-
+ 
 	if not lastPosition then lastPosition = rootPart.Position end
-
+ 
 	if (rootPart.Position - lastPosition).Magnitude > POSITION_EPSILON then
 		idleTimer = 0
 		isAutoMoving = false
@@ -380,7 +381,7 @@ RunService.Heartbeat:Connect(function(dt)
 		idleTimer += dt
 	end
 	lastPosition = rootPart.Position
-
+ 
 	if idleTimer >= IDLE_TIME and not isAutoMoving then
 		isAutoMoving = true
 		idleTimer = 0
@@ -397,10 +398,10 @@ RunService.Heartbeat:Connect(function(dt)
 		end)
 	end
 end)
-
+ 
 -- ================= [NEW] AUTO RESET ON FULL BAG =================
 local bagResetDebounce = false
-
+ 
 task.spawn(function()
 	-- Wait for the remote to exist before connecting
 	local ok, coinEvent = pcall(function()
@@ -409,50 +410,127 @@ task.spawn(function()
 			:WaitForChild("Gameplay", 10)
 			:WaitForChild("CoinCollected", 10)
 	end)
-
+ 
 	if not ok or not coinEvent then
 		warn("AutoCNS: CoinCollected remote not found – Auto Reset feature disabled.")
 		return
 	end
-
+ 
 	coinEvent.OnClientEvent:Connect(function(bagName, current, max)
 		if not autoResetOnFullBag then return end
 		if bagResetDebounce then return end
-
+ 
 		local isFull = current >= max
 		if not isFull then return end
-
+ 
 		bagResetDebounce = true
-
+ 
 		local char = player.Character or player.CharacterAdded:Wait()
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		if hum then
 			hum.Health = 0
 		end
-
+ 
 		task.wait(5)
 		bagResetDebounce = false
 	end)
 end)
-
+ 
+-- ================= NOCLIP =================
+-- Tracks every BasePart whose CanCollide we have set to false.
+-- Keys are the parts; we restore them all when noclip is turned off.
+local noclipDisabledParts: { [BasePart]: true } = {}
+ 
+-- Zone half-extents: a 20×20×20 box centred on the player.
+local NOCLIP_ZONE = Vector3.new(20, 20, 20)
+ 
+-- OverlapParams reused every tick (cheaper than creating a new one each call).
+local noclipOverlap = OverlapParams.new()
+noclipOverlap.FilterType = Enum.RaycastFilterType.Blacklist  -- we fill this below
+ 
+local function updateNoclipFilter()
+	local exclude: { Instance } = {}
+	if player.Character then
+		table.insert(exclude, player.Character)
+	end
+	if tweenPlatform then
+		table.insert(exclude, tweenPlatform)
+	end
+	noclipOverlap.FilterDescendantsInstances = exclude
+end
+ 
+-- Called every tick while noclip is ON: disables collisions on any
+-- BasePart whose AABB overlaps the 20-stud box around the player.
+local function noclipScanOnce()
+	if not rootPart then return end
+ 
+	-- Keep the filter up-to-date (tweenPlatform can be created/destroyed at any time).
+	updateNoclipFilter()
+ 
+	local hits = workspace:GetPartBoundsInBox(
+		CFrame.new(rootPart.Position),
+		NOCLIP_ZONE,
+		noclipOverlap
+	)
+ 
+	for _, part in ipairs(hits) do
+		-- Double-check it's not the tween platform (in case it was just created
+		-- between the filter update and the query).
+		if part == tweenPlatform then continue end
+		-- Skip character parts for safety.
+		if player.Character and part:IsDescendantOf(player.Character) then continue end
+ 
+		if part.CanCollide and not noclipDisabledParts[part] then
+			part.CanCollide = false
+			noclipDisabledParts[part] = true
+		end
+	end
+end
+ 
+-- Restores every part we ever touched. Called when noclip is toggled OFF
+-- or when the script is killed.
+local function restoreNoclipParts()
+	for part in pairs(noclipDisabledParts) do
+		-- The part may have been destroyed; pcall guards against that.
+		pcall(function()
+			if part.Parent then
+				part.CanCollide = true
+			end
+		end)
+	end
+	table.clear(noclipDisabledParts)
+end
+ 
+-- The background loop. Runs for as long as noclipEnabled is true.
+-- A new coroutine is spawned each time noclip is enabled so that
+-- toggling OFF → ON always produces a fresh loop.
+local function startNoclipLoop()
+	task.spawn(function()
+		while noclipEnabled and scriptEnabled do
+			noclipScanOnce()
+			task.wait(0.1)
+		end
+	end)
+end
+ 
 -- ================= FARM LOOP =================
 task.spawn(function()
 	local lockedTarget: Instance?
 	local targetStart = 0
 	local localLastPos: Vector3?
 	local lastMove = 0
-
+ 
 	while scriptEnabled do
 		task.wait(0.05)
-
+ 
 		local ok, err = pcall(function()
 			if not autoFarm or not humanoid or not rootPart then
 				lockedTarget = nil
 				return
 			end
-
+ 
 			refreshCoins()
-
+ 
 			if not lockedTarget or isBlacklisted(lockedTarget) then
 				lockedTarget = getNearestCoin()
 				if not lockedTarget then return end
@@ -460,16 +538,16 @@ task.spawn(function()
 				localLastPos = rootPart.Position
 				lastMove = os.clock()
 			end
-
+ 
 			local coin = lockedTarget
 			if not coin then return end
-
+ 
 			if os.clock() - targetStart > MAX_TARGET_TIME then
 				coinBlacklist[coin] = os.clock() + blacklistDuration
 				lockedTarget = nil
 				return
 			end
-
+ 
 			if localLastPos and (rootPart.Position - localLastPos).Magnitude > STUCK_DISTANCE then
 				localLastPos = rootPart.Position
 				lastMove = os.clock()
@@ -481,7 +559,7 @@ task.spawn(function()
 				lockedTarget = nil
 				return
 			end
-
+ 
 			local path
 			if moveMode == "Pathfinding" then
 				path = computePath(rootPart.Position, getPos(coin))
@@ -495,43 +573,43 @@ task.spawn(function()
 					return
 				end
 			end
-
+ 
 			moveTo(getPos(coin), path)
 			coinBlacklist[coin] = os.clock() + blacklistDuration
 			lockedTarget = nil
-
+ 
 			if postCollectDelay > 0 then task.wait(postCollectDelay) end
 		end)
-
+ 
 		if not ok then
 			warn("Autofarm error:", err)
 			task.wait(0.5)
 		end
 	end
 end)
-
+ 
 -- ================= GUI =================
 local gui = Instance.new("ScreenGui")
 gui.Name = "AutoCNS_UI"
 gui.ResetOnSpawn = false
 gui.Parent = player:WaitForChild("PlayerGui")
-
+ 
 local ACCENT = Color3.fromRGB(0, 170, 255)
 local BG_DARK = Color3.fromRGB(20, 23, 30)
 local BG_MID = Color3.fromRGB(36, 41, 52)
 local BTN_BASE = Color3.fromRGB(45, 50, 62)
 local BTN_HOVER = Color3.fromRGB(58, 66, 82)
 local BTN_PRESS = Color3.fromRGB(35, 40, 52)
-
+ 
 local function tween(instance: Instance, info: TweenInfo, props: { [string]: any })
 	TweenService:Create(instance, info, props):Play()
 end
-
+ 
 local function attachButtonFx(btn: TextButton, baseColor: Color3, hoverColor: Color3, pressColor: Color3)
 	btn.AutoButtonColor = false
 	btn.BackgroundColor3 = baseColor
 	local originalSize = btn.Size
-
+ 
 	btn.MouseEnter:Connect(function()
 		tween(btn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
 			BackgroundColor3 = hoverColor,
@@ -555,25 +633,25 @@ local function attachButtonFx(btn: TextButton, baseColor: Color3, hoverColor: Co
 		end
 	end)
 end
-
+ 
 -- Main frame – 42px taller to accommodate new button
 local main = Instance.new("Frame")
 main.Name = "Main"
-main.Size = UDim2.fromOffset(460, 512)
+main.Size = UDim2.fromOffset(460, 554)
 main.Position = UDim2.fromScale(0.04, 0.2)
 main.BackgroundColor3 = BG_DARK
 main.BorderSizePixel = 0
 main.Parent = gui
-
+ 
 local corner = Instance.new("UICorner", main)
 corner.CornerRadius = UDim.new(0, 10)
-
+ 
 local mainStroke = Instance.new("UIStroke")
 mainStroke.Color = Color3.fromRGB(75, 86, 110)
 mainStroke.Thickness = 1
 mainStroke.Transparency = 0.35
 mainStroke.Parent = main
-
+ 
 local mainGradient = Instance.new("UIGradient")
 mainGradient.Color = ColorSequence.new({
 	ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 34, 44)),
@@ -581,7 +659,7 @@ mainGradient.Color = ColorSequence.new({
 })
 mainGradient.Rotation = 90
 mainGradient.Parent = main
-
+ 
 local topBar = Instance.new("Frame")
 topBar.Name = "TopBar"
 topBar.Size = UDim2.new(1, 0, 0, 40)
@@ -589,7 +667,7 @@ topBar.BackgroundColor3 = BG_MID
 topBar.BorderSizePixel = 0
 topBar.Parent = main
 Instance.new("UICorner", topBar).CornerRadius = UDim.new(0, 10)
-
+ 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -70, 1, 0)
 title.Position = UDim2.fromOffset(12, 0)
@@ -600,7 +678,7 @@ title.BackgroundTransparency = 1
 title.TextScaled = true
 title.Font = Enum.Font.GothamSemibold
 title.Parent = topBar
-
+ 
 local minBtn = Instance.new("TextButton")
 minBtn.Size = UDim2.fromOffset(30, 26)
 minBtn.Position = UDim2.new(1, -68, 0, 7)
@@ -611,7 +689,7 @@ minBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
 minBtn.Parent = topBar
 Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
 attachButtonFx(minBtn, BTN_BASE, BTN_HOVER, BTN_PRESS)
-
+ 
 local hideBtn = Instance.new("TextButton")
 hideBtn.Size = UDim2.fromOffset(30, 26)
 hideBtn.Position = UDim2.new(1, -34, 0, 7)
@@ -622,13 +700,13 @@ hideBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
 hideBtn.Parent = topBar
 Instance.new("UICorner", hideBtn).CornerRadius = UDim.new(0, 4)
 attachButtonFx(hideBtn, Color3.fromRGB(95, 48, 48), Color3.fromRGB(124, 60, 60), Color3.fromRGB(78, 34, 34))
-
+ 
 local tabBar = Instance.new("Frame")
 tabBar.Size = UDim2.new(1, -20, 0, 40)
 tabBar.Position = UDim2.fromOffset(10, 50)
 tabBar.BackgroundTransparency = 1
 tabBar.Parent = main
-
+ 
 local farmTabBtn = Instance.new("TextButton")
 farmTabBtn.Size = UDim2.fromScale(0.49, 1)
 farmTabBtn.Position = UDim2.fromScale(0, 0)
@@ -638,7 +716,7 @@ farmTabBtn.Font = Enum.Font.GothamSemibold
 farmTabBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
 farmTabBtn.Parent = tabBar
 Instance.new("UICorner", farmTabBtn).CornerRadius = UDim.new(0, 6)
-
+ 
 local statsTabBtn = Instance.new("TextButton")
 statsTabBtn.Size = UDim2.fromScale(0.49, 1)
 statsTabBtn.Position = UDim2.fromScale(0.51, 0)
@@ -648,24 +726,24 @@ statsTabBtn.Font = Enum.Font.GothamSemibold
 statsTabBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
 statsTabBtn.Parent = tabBar
 Instance.new("UICorner", statsTabBtn).CornerRadius = UDim.new(0, 6)
-
+ 
 local content = Instance.new("Frame")
 content.Size = UDim2.new(1, -20, 1, -104)
 content.Position = UDim2.fromOffset(10, 96)
 content.BackgroundTransparency = 1
 content.Parent = main
-
+ 
 local farmTab = Instance.new("Frame")
 farmTab.Size = UDim2.fromScale(1, 1)
 farmTab.BackgroundTransparency = 1
 farmTab.Parent = content
-
+ 
 local statsTab = Instance.new("Frame")
 statsTab.Size = UDim2.fromScale(1, 1)
 statsTab.BackgroundTransparency = 1
 statsTab.Visible = false
 statsTab.Parent = content
-
+ 
 local function makeButton(parent: Instance, y: number, text: string, baseColor: Color3?, hoverColor: Color3?, pressColor: Color3?): TextButton
 	local btn = Instance.new("TextButton")
 	btn.Size = UDim2.new(1, 0, 0, 34)
@@ -679,7 +757,7 @@ local function makeButton(parent: Instance, y: number, text: string, baseColor: 
 	attachButtonFx(btn, baseColor or BTN_BASE, hoverColor or BTN_HOVER, pressColor or BTN_PRESS)
 	return btn
 end
-
+ 
 -- Buttons (same positions, new one inserted at y=210, sliders shifted +42)
 local farmBtn        = makeButton(farmTab,  0,   "Auto Farm: OFF")
 local modeBtn        = makeButton(farmTab,  42,  "Mode: Pathfinding")
@@ -689,83 +767,86 @@ local autoJumpBtn    = makeButton(farmTab, 168,  "Auto Jump: OFF")
 -- [NEW] Auto reset button
 local autoResetBtn   = makeButton(farmTab, 210,  "Auto Reset (Full Bag): OFF",
 	Color3.fromRGB(45, 50, 62), Color3.fromRGB(58, 66, 82), Color3.fromRGB(35, 40, 52))
-
--- Sliders shifted down by 42 to make room for the new button
+-- [NEW] Noclip button
+local noclipBtn      = makeButton(farmTab, 252,  "Noclip: OFF",
+	Color3.fromRGB(60, 38, 80), Color3.fromRGB(80, 52, 108), Color3.fromRGB(44, 28, 60))
+ 
+-- Sliders shifted down by 84 total (two extra buttons) to make room
 local speedLabel = Instance.new("TextLabel")
 speedLabel.Size = UDim2.new(1, 0, 0, 24)
-speedLabel.Position = UDim2.fromOffset(0, 256)
+speedLabel.Position = UDim2.fromOffset(0, 298)
 speedLabel.BackgroundTransparency = 1
 speedLabel.Text = "Tween Speed: " .. tweenSpeed
 speedLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
 speedLabel.Font = Enum.Font.Gotham
 speedLabel.TextScaled = true
 speedLabel.Parent = farmTab
-
+ 
 local speedBar = Instance.new("Frame")
 speedBar.Size = UDim2.new(1, 0, 0, 10)
-speedBar.Position = UDim2.fromOffset(0, 284)
+speedBar.Position = UDim2.fromOffset(0, 326)
 speedBar.BackgroundColor3 = Color3.fromRGB(67, 72, 86)
 speedBar.BorderSizePixel = 0
 speedBar.Parent = farmTab
 Instance.new("UICorner", speedBar).CornerRadius = UDim.new(1, 0)
-
+ 
 local speedFill = Instance.new("Frame")
 speedFill.Size = UDim2.fromScale((tweenSpeed - 5) / 45, 1)
 speedFill.BackgroundColor3 = ACCENT
 speedFill.BorderSizePixel = 0
 speedFill.Parent = speedBar
 Instance.new("UICorner", speedFill).CornerRadius = UDim.new(1, 0)
-
+ 
 local delayLabel = Instance.new("TextLabel")
 delayLabel.Size = UDim2.new(1, 0, 0, 24)
-delayLabel.Position = UDim2.fromOffset(0, 298)
+delayLabel.Position = UDim2.fromOffset(0, 340)
 delayLabel.BackgroundTransparency = 1
 delayLabel.Text = string.format("Delay: %.2fs", postCollectDelay)
 delayLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
 delayLabel.Font = Enum.Font.Gotham
 delayLabel.TextScaled = true
 delayLabel.Parent = farmTab
-
+ 
 local delayBar = Instance.new("Frame")
 delayBar.Size = UDim2.new(1, 0, 0, 10)
-delayBar.Position = UDim2.fromOffset(0, 326)
+delayBar.Position = UDim2.fromOffset(0, 368)
 delayBar.BackgroundColor3 = Color3.fromRGB(67, 72, 86)
 delayBar.BorderSizePixel = 0
 delayBar.Parent = farmTab
 Instance.new("UICorner", delayBar).CornerRadius = UDim.new(1, 0)
-
+ 
 local delayFill = Instance.new("Frame")
 delayFill.Size = UDim2.fromScale(math.clamp(postCollectDelay / 2, 0, 1), 1)
 delayFill.BackgroundColor3 = Color3.fromRGB(255, 170, 0)
 delayFill.BorderSizePixel = 0
 delayFill.Parent = delayBar
 Instance.new("UICorner", delayFill).CornerRadius = UDim.new(1, 0)
-
+ 
 local yOffsetLabel = Instance.new("TextLabel")
 yOffsetLabel.Size = UDim2.new(1, 0, 0, 24)
-yOffsetLabel.Position = UDim2.fromOffset(0, 340)
+yOffsetLabel.Position = UDim2.fromOffset(0, 382)
 yOffsetLabel.BackgroundTransparency = 1
 yOffsetLabel.Text = string.format("Tween Y Offset: %.2f", tweenYOffset)
 yOffsetLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
 yOffsetLabel.Font = Enum.Font.Gotham
 yOffsetLabel.TextScaled = true
 yOffsetLabel.Parent = farmTab
-
+ 
 local yOffsetBar = Instance.new("Frame")
 yOffsetBar.Size = UDim2.new(1, 0, 0, 10)
-yOffsetBar.Position = UDim2.fromOffset(0, 368)
+yOffsetBar.Position = UDim2.fromOffset(0, 410)
 yOffsetBar.BackgroundColor3 = Color3.fromRGB(67, 72, 86)
 yOffsetBar.BorderSizePixel = 0
 yOffsetBar.Parent = farmTab
 Instance.new("UICorner", yOffsetBar).CornerRadius = UDim.new(1, 0)
-
+ 
 local yOffsetFill = Instance.new("Frame")
 yOffsetFill.Size = UDim2.fromScale(math.clamp((tweenYOffset + 7) / 14, 0, 1), 1)
 yOffsetFill.BackgroundColor3 = Color3.fromRGB(122, 195, 255)
 yOffsetFill.BorderSizePixel = 0
 yOffsetFill.Parent = yOffsetBar
 Instance.new("UICorner", yOffsetFill).CornerRadius = UDim.new(1, 0)
-
+ 
 -- Stats tab
 local deathLabel = Instance.new("TextLabel")
 deathLabel.Size = UDim2.new(1, 0, 0, 34)
@@ -777,12 +858,12 @@ deathLabel.TextScaled = true
 deathLabel.Text = "Deaths: 0"
 deathLabel.Parent = statsTab
 Instance.new("UICorner", deathLabel).CornerRadius = UDim.new(0, 6)
-
+ 
 local deathStroke = Instance.new("UIStroke")
 deathStroke.Color = Color3.fromRGB(88, 98, 122)
 deathStroke.Transparency = 0.5
 deathStroke.Parent = deathLabel
-
+ 
 local uptimeLabel = Instance.new("TextLabel")
 uptimeLabel.Size = UDim2.new(1, 0, 0, 34)
 uptimeLabel.Position = UDim2.fromOffset(0, 42)
@@ -793,15 +874,15 @@ uptimeLabel.TextScaled = true
 uptimeLabel.Text = "Uptime: 00:00:00"
 uptimeLabel.Parent = statsTab
 Instance.new("UICorner", uptimeLabel).CornerRadius = UDim.new(0, 6)
-
+ 
 local uptimeStroke = Instance.new("UIStroke")
 uptimeStroke.Color = Color3.fromRGB(88, 98, 122)
 uptimeStroke.Transparency = 0.5
 uptimeStroke.Parent = uptimeLabel
-
+ 
 local killBtn = makeButton(statsTab, 260, "Kill Script",
 	Color3.fromRGB(110, 45, 45), Color3.fromRGB(132, 58, 58), Color3.fromRGB(92, 35, 35))
-
+ 
 local confirm = Instance.new("Frame")
 confirm.Size = UDim2.fromOffset(260, 120)
 confirm.Position = UDim2.fromScale(0.5, 0.5)
@@ -810,7 +891,7 @@ confirm.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 confirm.Visible = false
 confirm.Parent = main
 Instance.new("UICorner", confirm).CornerRadius = UDim.new(0, 8)
-
+ 
 local confirmText = Instance.new("TextLabel")
 confirmText.Size = UDim2.new(1, -12, 0, 52)
 confirmText.Position = UDim2.fromOffset(6, 6)
@@ -820,7 +901,7 @@ confirmText.TextScaled = true
 confirmText.Font = Enum.Font.GothamSemibold
 confirmText.TextColor3 = Color3.fromRGB(245, 245, 245)
 confirmText.Parent = confirm
-
+ 
 local yesBtn = Instance.new("TextButton")
 yesBtn.Size = UDim2.new(0.45, 0, 0, 34)
 yesBtn.Position = UDim2.fromOffset(12, 76)
@@ -832,7 +913,7 @@ yesBtn.TextColor3 = Color3.fromRGB(245, 245, 245)
 yesBtn.Parent = confirm
 Instance.new("UICorner", yesBtn).CornerRadius = UDim.new(0, 6)
 attachButtonFx(yesBtn, Color3.fromRGB(110, 45, 45), Color3.fromRGB(132, 58, 58), Color3.fromRGB(92, 35, 35))
-
+ 
 local noBtn = Instance.new("TextButton")
 noBtn.Size = UDim2.new(0.45, 0, 0, 34)
 noBtn.Position = UDim2.new(0.55, 0, 0, 76)
@@ -844,7 +925,7 @@ noBtn.TextColor3 = Color3.fromRGB(245, 245, 245)
 noBtn.Parent = confirm
 Instance.new("UICorner", noBtn).CornerRadius = UDim.new(0, 6)
 attachButtonFx(noBtn, BTN_BASE, BTN_HOVER, BTN_PRESS)
-
+ 
 local tinyToggle = Instance.new("TextButton")
 tinyToggle.Size = UDim2.fromOffset(90, 30)
 tinyToggle.Position = UDim2.fromScale(0.92, 0.45)
@@ -857,10 +938,10 @@ tinyToggle.Visible = false
 tinyToggle.Parent = gui
 Instance.new("UICorner", tinyToggle).CornerRadius = UDim.new(1, 0)
 attachButtonFx(tinyToggle, Color3.fromRGB(40, 45, 58), BTN_HOVER, BTN_PRESS)
-
+ 
 local isMinimized = false
 local fullSize = main.Size
-
+ 
 local function setMinimized(minimized: boolean)
 	isMinimized = minimized
 	content.Visible = not minimized
@@ -875,7 +956,7 @@ local function setMinimized(minimized: boolean)
 		minBtn.Text = "−"
 	end
 end
-
+ 
 local function hideMainToTiny()
 	tween(main, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { BackgroundTransparency = 1 })
 	task.delay(0.16, function()
@@ -885,19 +966,19 @@ local function hideMainToTiny()
 	end)
 	tinyToggle.Visible = true
 end
-
+ 
 local function showMainFromTiny()
 	main.Visible = true
 	main.BackgroundTransparency = 1
 	tween(main, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 0 })
 	tinyToggle.Visible = false
 end
-
+ 
 local function makeDraggable(handle: GuiObject, target: GuiObject)
 	local dragging = false
 	local dragStart: Vector2
 	local startPos: UDim2
-
+ 
 	handle.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			dragging = true
@@ -908,7 +989,7 @@ local function makeDraggable(handle: GuiObject, target: GuiObject)
 			end)
 		end
 	end)
-
+ 
 	UserInputService.InputChanged:Connect(function(input)
 		if not dragging then return end
 		if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
@@ -916,20 +997,20 @@ local function makeDraggable(handle: GuiObject, target: GuiObject)
 		target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 	end)
 end
-
+ 
 makeDraggable(topBar, main)
 makeDraggable(tinyToggle, tinyToggle)
-
+ 
 -- ================= UI LOGIC =================
 local activeTab = "Farm"
-
+ 
 local function setActiveTabButton(activeBtn: TextButton, inactiveBtn: TextButton)
 	activeBtn.BackgroundColor3 = Color3.fromRGB(62, 84, 130)
 	inactiveBtn.BackgroundColor3 = BTN_BASE
 	tween(activeBtn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextColor3 = Color3.fromRGB(255, 255, 255) })
 	tween(inactiveBtn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { TextColor3 = Color3.fromRGB(220, 225, 235) })
 end
-
+ 
 local function bindTabHover(btn: TextButton, tabName: string)
 	btn.AutoButtonColor = false
 	btn.MouseEnter:Connect(function()
@@ -946,30 +1027,30 @@ local function bindTabHover(btn: TextButton, tabName: string)
 		end
 	end)
 end
-
+ 
 bindTabHover(farmTabBtn, "Farm")
 bindTabHover(statsTabBtn, "Stats")
 setActiveTabButton(farmTabBtn, statsTabBtn)
-
+ 
 farmTabBtn.MouseButton1Click:Connect(function()
 	farmTab.Visible = true
 	statsTab.Visible = false
 	activeTab = "Farm"
 	setActiveTabButton(farmTabBtn, statsTabBtn)
 end)
-
+ 
 statsTabBtn.MouseButton1Click:Connect(function()
 	farmTab.Visible = false
 	statsTab.Visible = true
 	activeTab = "Stats"
 	setActiveTabButton(statsTabBtn, farmTabBtn)
 end)
-
+ 
 farmBtn.MouseButton1Click:Connect(function()
 	autoFarm = not autoFarm
 	farmBtn.Text = autoFarm and "Auto Farm: ON" or "Auto Farm: OFF"
 end)
-
+ 
 modeBtn.MouseButton1Click:Connect(function()
 	moveMode = (moveMode == "Pathfinding" and "Walk") or (moveMode == "Walk" and "Tween") or "Pathfinding"
 	modeBtn.Text = "Mode: " .. moveMode
@@ -979,32 +1060,43 @@ modeBtn.MouseButton1Click:Connect(function()
 		destroyTweenPlatform()
 	end
 end)
-
+ 
 tpBtn.MouseButton1Click:Connect(function()
 	tpIfStuck = not tpIfStuck
 	tpBtn.Text = tpIfStuck and "TP If Stuck: ON" or "TP If Stuck: OFF"
 end)
-
+ 
 autoWalkBtn.MouseButton1Click:Connect(function()
 	autoWalkIfIdleEnabled = not autoWalkIfIdleEnabled
 	autoWalkBtn.Text = autoWalkIfIdleEnabled and "Auto Walk If Idle: ON" or "Auto Walk If Idle: OFF"
 end)
-
+ 
 autoJumpBtn.MouseButton1Click:Connect(function()
 	autoJumpEnabled = not autoJumpEnabled
 	autoJumpBtn.Text = autoJumpEnabled and "Auto Jump: ON" or "Auto Jump: OFF"
 end)
-
+ 
 -- [NEW] Auto reset toggle
 autoResetBtn.MouseButton1Click:Connect(function()
 	autoResetOnFullBag = not autoResetOnFullBag
 	autoResetBtn.Text = autoResetOnFullBag and "Auto Reset (Full Bag): ON" or "Auto Reset (Full Bag): OFF"
 end)
-
+ 
+-- [NEW] Noclip toggle
+noclipBtn.MouseButton1Click:Connect(function()
+	noclipEnabled = not noclipEnabled
+	noclipBtn.Text = noclipEnabled and "Noclip: ON" or "Noclip: OFF"
+	if noclipEnabled then
+		startNoclipLoop()
+	else
+		restoreNoclipParts()
+	end
+end)
+ 
 local draggingSpeed = false
 local draggingDelay = false
 local draggingYOffset = false
-
+ 
 speedBar.InputBegan:Connect(function(i)
 	if i.UserInputType == Enum.UserInputType.MouseButton1 then draggingSpeed = true end
 end)
@@ -1014,7 +1106,7 @@ end)
 yOffsetBar.InputBegan:Connect(function(i)
 	if i.UserInputType == Enum.UserInputType.MouseButton1 then draggingYOffset = true end
 end)
-
+ 
 UserInputService.InputEnded:Connect(function(i)
 	if i.UserInputType == Enum.UserInputType.MouseButton1 then
 		draggingSpeed = false
@@ -1022,10 +1114,10 @@ UserInputService.InputEnded:Connect(function(i)
 		draggingYOffset = false
 	end
 end)
-
+ 
 RunService.RenderStepped:Connect(function()
 	if not scriptEnabled then return end
-
+ 
 	if draggingSpeed then
 		local m = player:GetMouse()
 		local x = math.clamp((m.X - speedBar.AbsolutePosition.X) / speedBar.AbsoluteSize.X, 0, 1)
@@ -1033,7 +1125,7 @@ RunService.RenderStepped:Connect(function()
 		tweenSpeed = math.floor(5 + x * 45)
 		speedLabel.Text = "Tween Speed: " .. tweenSpeed
 	end
-
+ 
 	if draggingDelay then
 		local m = player:GetMouse()
 		local x = math.clamp((m.X - delayBar.AbsolutePosition.X) / delayBar.AbsoluteSize.X, 0, 1)
@@ -1041,7 +1133,7 @@ RunService.RenderStepped:Connect(function()
 		postCollectDelay = math.floor(x * 2 * 100) / 100
 		delayLabel.Text = string.format("Delay: %.2fs", postCollectDelay)
 	end
-
+ 
 	if draggingYOffset then
 		local m = player:GetMouse()
 		local x = math.clamp((m.X - yOffsetBar.AbsolutePosition.X) / yOffsetBar.AbsoluteSize.X, 0, 1)
@@ -1051,33 +1143,35 @@ RunService.RenderStepped:Connect(function()
 		yOffsetLabel.Text = string.format("Tween Y Offset: %.2f", tweenYOffset)
 	end
 end)
-
+ 
 minBtn.MouseButton1Click:Connect(function() setMinimized(not isMinimized) end)
 hideBtn.MouseButton1Click:Connect(function() hideMainToTiny() end)
 tinyToggle.MouseButton1Click:Connect(function() showMainFromTiny() end)
-
+ 
 local function shutdownScript()
 	scriptEnabled = false
 	autoFarm = false
 	autoJumpEnabled = false
 	autoWalkIfIdleEnabled = false
 	autoResetOnFullBag = false
-
+	noclipEnabled = false
+	restoreNoclipParts()
+ 
 	if activeTween then activeTween:Cancel() end
 	if activePlatformTween then activePlatformTween:Cancel() end
 	destroyTweenPlatform()
 	gui.Enabled = false
 end
-
+ 
 killBtn.MouseButton1Click:Connect(function() confirm.Visible = true end)
 noBtn.MouseButton1Click:Connect(function() confirm.Visible = false end)
 yesBtn.MouseButton1Click:Connect(function()
 	confirm.Visible = false
 	shutdownScript()
 end)
-
+ 
 local startTime = os.clock()
-
+ 
 task.spawn(function()
 	while scriptEnabled do
 		deathLabel.Text = "Deaths: " .. tostring(deathCount)
