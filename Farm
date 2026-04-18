@@ -19,8 +19,8 @@ local postCollectDelay = 0
 local tpIfStuck = false
 local autoJumpEnabled = false
 local autoWalkIfIdleEnabled = false
-local autoResetOnFullBag = false   -- kill on full bag
-local noclipEnabled = false        -- noclip toggle
+local autoResetOnFullBag = false
+local noclipEnabled = false
  
 local DROP_HEIGHT_ALLOW = 6
 local DROP_CHECK_DISTANCE = 6
@@ -32,13 +32,11 @@ local MAX_TARGET_TIME = 6
 local STUCK_DISTANCE = 1.5
 local STUCK_TIME = 1.2
  
--- Auto jump settings
 local RAY_DISTANCE = 4
 local RAY_HEIGHT_OFFSET = -1
 local JUMP_COOLDOWN = 0.5
 local lastJump = 0
  
--- Auto walk if idle settings
 local IDLE_TIME = 5
 local MOVE_DISTANCE = 10
 local WALL_DETECTION_DISTANCE = 3
@@ -172,7 +170,7 @@ end
  
 -- ================= MOVEMENT =================
 local activeTween: Tween?
-local activePlatformTween: Tween?   -- [FIX] separate tween for platform
+local activePlatformTween: Tween?
 local tweenPlatform: Part?
 local TWEEN_PLATFORM_SIZE = Vector3.new(6, 1, 6)
 local TWEEN_PLATFORM_COLOR = Color3.fromRGB(57, 255, 20)
@@ -225,8 +223,6 @@ local function ensureTweenPlatform()
 		tweenPlatform = part
 	end
  
-	-- Only update position when NOT in the middle of a tween
-	-- (during tween, the platform is driven by activePlatformTween)
 	if not activePlatformTween or activePlatformTween.PlaybackState ~= Enum.PlaybackState.Playing then
 		local platformPosition = getTweenPlatformPosition()
 		if platformPosition then
@@ -259,8 +255,6 @@ local function moveTo(target: Vector3, path: Path?): boolean
 		local travelTime = math.max(dist / tweenSpeed, 0.05)
 		local tweenTarget = target + Vector3.new(0, tweenYOffset, 0)
  
-		-- [FIX] Tween the platform to its target position simultaneously
-		-- so it follows the character even when moving upward
 		if tweenPlatform then
 			local platformTarget = tweenTarget - Vector3.new(0, getUnderFeetOffset(), 0)
 			activePlatformTween = TweenService:Create(
@@ -279,7 +273,6 @@ local function moveTo(target: Vector3, path: Path?): boolean
 		activeTween:Play()
 		activeTween.Completed:Wait()
  
-		-- Snap platform after tween ends to stay perfectly aligned
 		if tweenPlatform then
 			local finalPos = getTweenPlatformPosition()
 			if finalPos then
@@ -399,11 +392,10 @@ RunService.Heartbeat:Connect(function(dt)
 	end
 end)
  
--- ================= [NEW] AUTO RESET ON FULL BAG =================
+-- ================= AUTO RESET ON FULL BAG =================
 local bagResetDebounce = false
  
 task.spawn(function()
-	-- Wait for the remote to exist before connecting
 	local ok, coinEvent = pcall(function()
 		return ReplicatedStorage
 			:WaitForChild("Remotes", 10)
@@ -419,34 +411,42 @@ task.spawn(function()
 	coinEvent.OnClientEvent:Connect(function(bagName, current, max)
 		if not autoResetOnFullBag then return end
 		if bagResetDebounce then return end
- 
+
 		local isFull = current >= max
 		if not isFull then return end
- 
+
 		bagResetDebounce = true
- 
+
 		local char = player.Character or player.CharacterAdded:Wait()
 		local hum = char:FindFirstChildOfClass("Humanoid")
+		local root = char:FindFirstChild("HumanoidRootPart")
+
+		if moveMode == "Tween" and root then
+			-- Cancel les tweens actifs pour qu'ils ne re-écrasent pas le TP
+			if activeTween then activeTween:Cancel() activeTween = nil end
+			if activePlatformTween then activePlatformTween:Cancel() activePlatformTween = nil end
+			-- Pause le farm loop le temps du TP
+			local wasAutoFarm = autoFarm
+			autoFarm = false
+			root.CFrame = CFrame.new(0, 10000, 0)
+			task.wait(1)
+			autoFarm = wasAutoFarm
+		end
+
 		if hum then
 			hum.Health = 0
 		end
- 
+
 		task.wait(5)
 		bagResetDebounce = false
 	end)
 end)
  
 -- ================= NOCLIP =================
--- Tracks every BasePart whose CanCollide we have set to false.
--- Keys are the parts; we restore them all when noclip is turned off.
 local noclipDisabledParts: { [BasePart]: true } = {}
- 
--- Zone half-extents: a 20×20×20 box centred on the player.
 local NOCLIP_ZONE = Vector3.new(20, 20, 20)
- 
--- OverlapParams reused every tick (cheaper than creating a new one each call).
 local noclipOverlap = OverlapParams.new()
-noclipOverlap.FilterType = Enum.RaycastFilterType.Blacklist  -- we fill this below
+noclipOverlap.FilterType = Enum.RaycastFilterType.Blacklist
  
 local function updateNoclipFilter()
 	local exclude: { Instance } = {}
@@ -459,27 +459,17 @@ local function updateNoclipFilter()
 	noclipOverlap.FilterDescendantsInstances = exclude
 end
  
--- Called every tick while noclip is ON: disables collisions on any
--- BasePart whose AABB overlaps the 20-stud box around the player.
 local function noclipScanOnce()
 	if not rootPart then return end
- 
-	-- Keep the filter up-to-date (tweenPlatform can be created/destroyed at any time).
 	updateNoclipFilter()
- 
 	local hits = workspace:GetPartBoundsInBox(
 		CFrame.new(rootPart.Position),
 		NOCLIP_ZONE,
 		noclipOverlap
 	)
- 
 	for _, part in ipairs(hits) do
-		-- Double-check it's not the tween platform (in case it was just created
-		-- between the filter update and the query).
 		if part == tweenPlatform then continue end
-		-- Skip character parts for safety.
 		if player.Character and part:IsDescendantOf(player.Character) then continue end
- 
 		if part.CanCollide and not noclipDisabledParts[part] then
 			part.CanCollide = false
 			noclipDisabledParts[part] = true
@@ -487,11 +477,8 @@ local function noclipScanOnce()
 	end
 end
  
--- Restores every part we ever touched. Called when noclip is toggled OFF
--- or when the script is killed.
 local function restoreNoclipParts()
 	for part in pairs(noclipDisabledParts) do
-		-- The part may have been destroyed; pcall guards against that.
 		pcall(function()
 			if part.Parent then
 				part.CanCollide = true
@@ -501,9 +488,6 @@ local function restoreNoclipParts()
 	table.clear(noclipDisabledParts)
 end
  
--- The background loop. Runs for as long as noclipEnabled is true.
--- A new coroutine is spawned each time noclip is enabled so that
--- toggling OFF → ON always produces a fresh loop.
 local function startNoclipLoop()
 	task.spawn(function()
 		while noclipEnabled and scriptEnabled do
@@ -634,7 +618,6 @@ local function attachButtonFx(btn: TextButton, baseColor: Color3, hoverColor: Co
 	end)
 end
  
--- Main frame – 42px taller to accommodate new button
 local main = Instance.new("Frame")
 main.Name = "Main"
 main.Size = UDim2.fromOffset(460, 554)
@@ -758,20 +741,16 @@ local function makeButton(parent: Instance, y: number, text: string, baseColor: 
 	return btn
 end
  
--- Buttons (same positions, new one inserted at y=210, sliders shifted +42)
 local farmBtn        = makeButton(farmTab,  0,   "Auto Farm: OFF")
 local modeBtn        = makeButton(farmTab,  42,  "Mode: Pathfinding")
 local tpBtn          = makeButton(farmTab,  84,  "TP If Stuck: OFF")
 local autoWalkBtn    = makeButton(farmTab, 126,  "Auto Walk If Idle: OFF")
 local autoJumpBtn    = makeButton(farmTab, 168,  "Auto Jump: OFF")
--- [NEW] Auto reset button
 local autoResetBtn   = makeButton(farmTab, 210,  "Auto Reset (Full Bag): OFF",
 	Color3.fromRGB(45, 50, 62), Color3.fromRGB(58, 66, 82), Color3.fromRGB(35, 40, 52))
--- [NEW] Noclip button
 local noclipBtn      = makeButton(farmTab, 252,  "Noclip: OFF",
 	Color3.fromRGB(60, 38, 80), Color3.fromRGB(80, 52, 108), Color3.fromRGB(44, 28, 60))
  
--- Sliders shifted down by 84 total (two extra buttons) to make room
 local speedLabel = Instance.new("TextLabel")
 speedLabel.Size = UDim2.new(1, 0, 0, 24)
 speedLabel.Position = UDim2.fromOffset(0, 298)
@@ -847,7 +826,6 @@ yOffsetFill.BorderSizePixel = 0
 yOffsetFill.Parent = yOffsetBar
 Instance.new("UICorner", yOffsetFill).CornerRadius = UDim.new(1, 0)
  
--- Stats tab
 local deathLabel = Instance.new("TextLabel")
 deathLabel.Size = UDim2.new(1, 0, 0, 34)
 deathLabel.Position = UDim2.fromOffset(0, 0)
@@ -1076,13 +1054,11 @@ autoJumpBtn.MouseButton1Click:Connect(function()
 	autoJumpBtn.Text = autoJumpEnabled and "Auto Jump: ON" or "Auto Jump: OFF"
 end)
  
--- [NEW] Auto reset toggle
 autoResetBtn.MouseButton1Click:Connect(function()
 	autoResetOnFullBag = not autoResetOnFullBag
 	autoResetBtn.Text = autoResetOnFullBag and "Auto Reset (Full Bag): ON" or "Auto Reset (Full Bag): OFF"
 end)
  
--- [NEW] Noclip toggle
 noclipBtn.MouseButton1Click:Connect(function()
 	noclipEnabled = not noclipEnabled
 	noclipBtn.Text = noclipEnabled and "Noclip: ON" or "Noclip: OFF"
