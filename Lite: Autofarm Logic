@@ -1,0 +1,341 @@
+--!strict
+print('Autofarm Executed')
+-- ================= SERVICES =================
+local Players         = game:GetService("Players")
+local TweenService    = game:GetService("TweenService")
+local RunService      = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+
+-- ================= SETTINGS =================
+local scriptEnabled      = true
+local autoFarm           = true
+local noclipEnabled      = true
+local autoResetOnFullBag = true
+
+local tweenSpeed         = 22
+local blacklistDuration  = 6
+local LOBBY_IGNORE_DISTANCE = 500
+local MAX_TARGET_TIME    = 6
+local STUCK_DISTANCE     = 1.5
+local STUCK_TIME         = 1.2
+
+-- ================= RANDOMIZE MODE =================
+-- Toutes les RANDOMIZE_EVERY cibles, on choisit une pièce aléatoire au lieu de la plus proche.
+local RANDOMIZE_EVERY   = 5
+local targetCounter     = 0   -- incrémenté à chaque nouvelle cible verrouillée
+
+-- ================= CHARACTER =================
+local humanoid: Humanoid?
+local rootPart: BasePart?
+
+local function bindCharacter(char: Model)
+	humanoid = char:WaitForChild("Humanoid") :: Humanoid
+	rootPart  = char:WaitForChild("HumanoidRootPart") :: BasePart
+end
+
+if player.Character then bindCharacter(player.Character) end
+player.CharacterAdded:Connect(function(char) task.wait(0.2); bindCharacter(char) end)
+
+-- ================= COINS =================
+local coinBlacklist: { [Instance]: number } = {}
+local coinSet: { [Instance]: true } = {}
+
+local function isCoinBlacklisted(coin: Instance): boolean
+	local t = coinBlacklist[coin]
+	if not t then return false end
+	if os.clock() > t then coinBlacklist[coin] = nil; return false end
+	return true
+end
+
+local function getPos(obj: Instance): Vector3
+	if obj:IsA("BasePart") then return obj.Position end
+	return obj:GetPivot().Position
+end
+
+local function initCoinCache()
+	table.clear(coinSet)
+	for _, v in ipairs(workspace:GetDescendants()) do
+		if v.Name == "Coin_Server" then coinSet[v] = true end
+	end
+end
+
+local function startCoinWatcher()
+	workspace.DescendantAdded:Connect(function(v)
+		if v.Name == "Coin_Server" then coinSet[v] = true end
+	end)
+	workspace.DescendantRemoving:Connect(function(v)
+		if coinSet[v] then coinSet[v] = nil end
+	end)
+end
+
+initCoinCache()
+startCoinWatcher()
+
+local function refreshCoins()
+	local now = os.clock()
+	for coin, expiry in pairs(coinBlacklist) do
+		if now > expiry then coinBlacklist[coin] = nil end
+	end
+end
+
+-- Retourne la pièce la plus proche (ignorée si blacklistée).
+local function getNearestCoin(): Instance?
+	if not rootPart then return nil end
+	local best: Instance? = nil
+	local bestDist = math.huge
+	local myPos = rootPart.Position
+	for coin in pairs(coinSet) do
+		if not isCoinBlacklisted(coin) then
+			local d = (getPos(coin) - myPos).Magnitude
+			if d < bestDist and d < LOBBY_IGNORE_DISTANCE then
+				bestDist = d; best = coin
+			end
+		end
+	end
+	return best
+end
+
+-- Retourne une pièce aléatoire parmi les pièces disponibles (non blacklistées, dans le rayon).
+local function getRandomCoin(): Instance?
+	if not rootPart then return nil end
+	local myPos = rootPart.Position
+	local candidates: { Instance } = {}
+	for coin in pairs(coinSet) do
+		if not isCoinBlacklisted(coin) then
+			local d = (getPos(coin) - myPos).Magnitude
+			if d < LOBBY_IGNORE_DISTANCE then
+				table.insert(candidates, coin)
+			end
+		end
+	end
+	if #candidates == 0 then return nil end
+	return candidates[math.random(1, #candidates)]
+end
+
+-- Sélectionne la prochaine cible selon le mode Randomize :
+-- toutes les RANDOMIZE_EVERY cibles → aléatoire, sinon → la plus proche.
+local function pickNextCoin(): Instance?
+	targetCounter += 1
+	if targetCounter % RANDOMIZE_EVERY == 0 then
+		return getRandomCoin()
+	end
+	return getNearestCoin()
+end
+
+-- ================= TWEEN PLATFORM =================
+local activeTween: Tween?
+local activePlatformTween: Tween?
+local tweenPlatform: Part?
+
+local TWEEN_PLATFORM_SIZE  = Vector3.new(6, 1, 6)
+local TWEEN_PLATFORM_COLOR = Color3.fromRGB(57, 255, 20)
+
+local function destroyTweenPlatform()
+	if activePlatformTween then activePlatformTween:Cancel(); activePlatformTween = nil end
+	if tweenPlatform then tweenPlatform:Destroy(); tweenPlatform = nil end
+end
+
+local function getUnderFeetOffset(): number
+	if not humanoid or not rootPart then return 3 end
+	return humanoid.HipHeight + rootPart.Size.Y * 0.5 + 0.5
+end
+
+local function getTweenPlatformPosition(): Vector3?
+	if not rootPart or not humanoid then return nil end
+	return rootPart.Position - Vector3.new(0, getUnderFeetOffset(), 0)
+end
+
+local function ensureTweenPlatform()
+	if not rootPart or not humanoid then destroyTweenPlatform(); return end
+	if not tweenPlatform then
+		local part = Instance.new("Part")
+		part.Name = "TweenFloatPlatform"
+		part.Size = TWEEN_PLATFORM_SIZE
+		part.Anchored = true
+		part.CanCollide = true
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Material = Enum.Material.Neon
+		part.Color = TWEEN_PLATFORM_COLOR
+		part.Transparency = 0
+		part.TopSurface = Enum.SurfaceType.Smooth
+		part.BottomSurface = Enum.SurfaceType.Smooth
+		part.Parent = workspace
+		tweenPlatform = part
+	end
+	if not activePlatformTween or activePlatformTween.PlaybackState ~= Enum.PlaybackState.Playing then
+		local p = getTweenPlatformPosition()
+		if p then tweenPlatform.CFrame = CFrame.new(p) end
+	end
+end
+
+RunService.RenderStepped:Connect(function()
+	if not scriptEnabled then destroyTweenPlatform(); return end
+	ensureTweenPlatform()
+end)
+
+-- ================= TWEEN MOUVEMENT =================
+local function moveToTween(target: Vector3)
+	if not humanoid or not rootPart then return end
+	ensureTweenPlatform()
+	if activeTween then activeTween:Cancel() end
+	if activePlatformTween then activePlatformTween:Cancel() end
+	local dist = (rootPart.Position - target).Magnitude
+	local travelTime = math.max(dist / tweenSpeed, 0.05)
+	if tweenPlatform then
+		activePlatformTween = TweenService:Create(
+			tweenPlatform,
+			TweenInfo.new(travelTime, Enum.EasingStyle.Linear),
+			{ CFrame = CFrame.new(target - Vector3.new(0, getUnderFeetOffset(), 0)) }
+		)
+		activePlatformTween:Play()
+	end
+	activeTween = TweenService:Create(
+		rootPart,
+		TweenInfo.new(travelTime, Enum.EasingStyle.Linear),
+		{ CFrame = CFrame.new(target) }
+	)
+	activeTween:Play()
+	activeTween.Completed:Wait()
+	if tweenPlatform then
+		local fp = getTweenPlatformPosition()
+		if fp then tweenPlatform.CFrame = CFrame.new(fp) end
+	end
+end
+
+-- ================= NOCLIP =================
+local noclipDisabledParts: { [BasePart]: true } = {}
+local NOCLIP_ZONE = Vector3.new(20, 20, 20)
+local noclipOverlap = OverlapParams.new()
+noclipOverlap.FilterType = Enum.RaycastFilterType.Blacklist
+
+local function updateNoclipFilter()
+	local ex: { Instance } = {}
+	if player.Character then table.insert(ex, player.Character) end
+	if tweenPlatform then table.insert(ex, tweenPlatform) end
+	noclipOverlap.FilterDescendantsInstances = ex
+end
+
+local function noclipScanOnce()
+	if not rootPart then return end
+	updateNoclipFilter()
+	for _, part in ipairs(workspace:GetPartBoundsInBox(CFrame.new(rootPart.Position), NOCLIP_ZONE, noclipOverlap)) do
+		if part == tweenPlatform then continue end
+		if player.Character and part:IsDescendantOf(player.Character) then continue end
+		if part.CanCollide and not noclipDisabledParts[part] then
+			part.CanCollide = false
+			noclipDisabledParts[part] = true
+		end
+	end
+end
+
+local function restoreNoclipParts()
+	for part in pairs(noclipDisabledParts) do
+		pcall(function() if part.Parent then part.CanCollide = true end end)
+	end
+	table.clear(noclipDisabledParts)
+end
+
+task.spawn(function()
+	while scriptEnabled do
+		if noclipEnabled then noclipScanOnce() end
+		task.wait(0.1)
+	end
+	restoreNoclipParts()
+end)
+
+-- ================= AUTO RESET ON FULL BAG =================
+local bagResetDebounce = false
+task.spawn(function()
+	local ok, coinEvent = pcall(function()
+		return ReplicatedStorage
+			:WaitForChild("Remotes", 10)
+			:WaitForChild("Gameplay", 10)
+			:WaitForChild("CoinCollected", 10)
+	end)
+	if not ok or not coinEvent then
+		warn("AutoReset: CoinCollected remote introuvable.")
+		return
+	end
+	coinEvent.OnClientEvent:Connect(function(_, current, max)
+		if not autoResetOnFullBag or bagResetDebounce or current < max then return end
+		bagResetDebounce = true
+		local char = player.Character or player.CharacterAdded:Wait()
+		local hum  = char:FindFirstChildOfClass("Humanoid")
+		local root = char:FindFirstChild("HumanoidRootPart")
+		if root then
+			if activeTween then activeTween:Cancel(); activeTween = nil end
+			if activePlatformTween then activePlatformTween:Cancel(); activePlatformTween = nil end
+			local was = autoFarm
+			autoFarm = false
+			root.CFrame = CFrame.new(0, 10000, 0)
+			task.wait(1)
+			autoFarm = was
+		end
+		if hum then hum.Health = 0 end
+		task.wait(5)
+		bagResetDebounce = false
+	end)
+end)
+
+-- ================= FARM LOOP =================
+task.spawn(function()
+	local lockedTarget: Instance?
+	local targetStart    = 0
+	local localLastPos: Vector3?
+	local lastMove       = 0
+	local lastBlacklistClean = 0
+
+	while scriptEnabled do
+		task.wait(0.05)
+		local ok, err = pcall(function()
+			if not autoFarm or not humanoid or not rootPart then
+				lockedTarget = nil
+				return
+			end
+
+			local now = os.clock()
+			if now - lastBlacklistClean >= 1 then
+				refreshCoins()
+				lastBlacklistClean = now
+			end
+
+			if not lockedTarget or isCoinBlacklisted(lockedTarget) then
+				lockedTarget = pickNextCoin()
+				if not lockedTarget then return end
+				targetStart   = os.clock()
+				localLastPos  = rootPart.Position
+				lastMove      = os.clock()
+			end
+
+			local coin = lockedTarget
+			if not coin then return end
+
+			if os.clock() - targetStart > MAX_TARGET_TIME then
+				coinBlacklist[coin] = os.clock() + blacklistDuration
+				lockedTarget = nil
+				return
+			end
+
+			if localLastPos and (rootPart.Position - localLastPos).Magnitude > STUCK_DISTANCE then
+				localLastPos = rootPart.Position
+				lastMove = os.clock()
+			elseif os.clock() - lastMove > STUCK_TIME then
+				coinBlacklist[coin] = os.clock() + blacklistDuration
+				lockedTarget = nil
+				return
+			end
+
+			moveToTween(getPos(coin))
+			coinBlacklist[coin] = os.clock() + blacklistDuration
+			lockedTarget = nil
+		end)
+
+		if not ok then
+			warn("Autofarm error:", err)
+			task.wait(0.5)
+		end
+	end
+end)
