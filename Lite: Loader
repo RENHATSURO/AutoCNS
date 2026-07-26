@@ -1,1 +1,8 @@
-
+print('Executing Autofarm Logic')
+loadstring(game:HttpGet("https://raw.githubusercontent.com/RENHATSURO/AutoCNS/refs/heads/main/Lite%3A%20Autofarm%20Logic"))()
+print('Executing Anti Fling')
+loadstring(game:HttpGet("ZZZZZZZZZZZZZZZZZZ"))()
+print('Executing No Render')
+loadstring(game:HttpGet("ZZZZZZZZZZZZZZZZZZZZZZ"))()
+print('Executing Anti Idle')
+loadstring(game:HttpGet("https://raw.githubusercontent.com/RENHATSURO/AutoCNS/refs/heads/main/Lite%3A%20Anti-idle"))()
