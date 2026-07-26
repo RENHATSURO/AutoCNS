@@ -6,7 +6,7 @@ game:GetService('Players').LocalPlayer.Idled:Connect(function()
 end)
 
 game:GetService("StarterGui"):SetCore("SendNotification", {
-    Title = "Bot kaitun script",
+    Title = "Executed Lite Autofarm",
     Text = "by RenHatsuro",
     Button1 = "Fuck off",
     Duration = 5
