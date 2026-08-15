@@ -1,5 +1,4 @@
 --!strict
-loadstring(game:HttpGet("https://raw.githubusercontent.com/RENHATSURO/AutoCNS/refs/heads/main/Lite%3A%20Anti-idle"))()
 -- ================= SERVICES =================
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
