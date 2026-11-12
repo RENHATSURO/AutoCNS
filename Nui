@@ -1,0 +1,2168 @@
+-- =====================================================================================
+--  AutoCNS : NOUVELLE INTERFACE (ACNS + Aura & VFX) reconnectée à la logique de l'ancienne version
+--
+--  Structure du fichier :
+--    1) Logique de jeu (farm, noclip, sécurité...)  -> dans un bloc do ... end
+--       Elle expose des fonctions via la table "Bridge" (setAutoFarm, setNoclip, ...).
+--    2) Interface                                   -> les callbacks des boutons appellent Bridge.*
+--
+--  Les deux parties sont séparées en blocs pour ne pas dépasser la limite de 200 variables locales.
+--  Touche pour afficher / cacher : RightShift (CONFIG.toggleKey).
+-- =====================================================================================
+
+-- Si le script est relancé : on détruit l'ancienne instance (UI + logique) AVANT de démarrer la nouvelle.
+local env = typeof(getgenv) == "function" and getgenv() or _G
+local previous = env.__ACNS_TemplateUI
+if previous then
+	pcall(previous.Destroy, true)
+end
+
+-- Pont entre la logique et l'interface
+local Bridge = {}
+
+-- =====================================================================================
+--  1) LOGIQUE DE JEU
+-- =====================================================================================
+do
+	-- ================= SERVICES =================
+	local Players = game:GetService("Players")
+	local PathfindingService = game:GetService("PathfindingService")
+	local TweenService = game:GetService("TweenService")
+	local RunService = game:GetService("RunService")
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+	local player = Players.LocalPlayer
+
+	-- ================= SETTINGS =================
+	local scriptEnabled = true
+	local autoFarm = false
+	local moveMode = "Pathfinding"
+	local tweenSpeed = 22
+	local tweenYOffset = 0
+	local postCollectDelay = 0
+	local tpIfStuck = false
+	local autoJumpEnabled = false
+	local autoWalkIfIdleEnabled = false
+	local autoResetOnFullBag = false
+	local noclipEnabled = false
+
+	local DROP_HEIGHT_ALLOW = 6
+	local DROP_CHECK_DISTANCE = 6
+	local blacklistDuration = 6
+	local MAX_PATH_DISTANCE = 300
+	local LOBBY_IGNORE_DISTANCE = 500
+	local MAX_TARGET_TIME = 6
+	local STUCK_DISTANCE = 1.5
+	local STUCK_TIME = 1.2
+	local RAY_DISTANCE = 4
+	local RAY_HEIGHT_OFFSET = -1
+	local JUMP_COOLDOWN = 0.5
+	local lastJump = 0
+	local IDLE_TIME = 5
+	local MOVE_DISTANCE = 10
+	local WALL_DETECTION_DISTANCE = 3
+	local POSITION_EPSILON = 0.15
+
+	-- ================= SECURITY SETTINGS =================
+	local antiFlingEnabled = true
+	local blacklistedPlayerEnabled = true
+	local antiUnknownPlayerEnabled = false
+
+	local BLACKLISTED_USER_IDS = { 12345, 67890, 676767 }
+
+	-- ================= CHARACTER =================
+	local humanoid: Humanoid?
+	local rootPart: BasePart?
+	local deathCount = 0
+	local characterDiedConnection: RBXScriptConnection?
+
+	local function bindCharacter(char: Model)
+		humanoid = char:WaitForChild("Humanoid") :: Humanoid
+		rootPart  = char:WaitForChild("HumanoidRootPart") :: BasePart
+		lastJump  = 0
+		if characterDiedConnection then characterDiedConnection:Disconnect() end
+		characterDiedConnection = humanoid.Died:Connect(function() deathCount += 1 end)
+	end
+
+	if player.Character then bindCharacter(player.Character) end
+	player.CharacterAdded:Connect(function(char) task.wait(0.2); bindCharacter(char) end)
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+	local function updateRaycastFilter()
+		if player.Character then rayParams.FilterDescendantsInstances = { player.Character } end
+	end
+	updateRaycastFilter()
+	player.CharacterAdded:Connect(function() task.wait(0.2); updateRaycastFilter() end)
+
+	-- ================= COINS =================
+	-- Système événementiel : la liste est maintenue en temps réel via DescendantAdded/Removing.
+	local coinBlacklist: { [Instance]: number } = {}
+	local coinSet: { [Instance]: true } = {}
+	local coinConnAdded: RBXScriptConnection?
+	local coinConnRemoving: RBXScriptConnection?
+
+	local function isCoinBlacklisted(coin: Instance): boolean
+		local t = coinBlacklist[coin]
+		if not t then return false end
+		if os.clock() > t then coinBlacklist[coin] = nil; return false end
+		return true
+	end
+
+	local function getPos(obj: Instance): Vector3
+		if obj:IsA("BasePart") then return obj.Position end
+		return obj:GetPivot().Position
+	end
+
+	local function initCoinCache()
+		table.clear(coinSet)
+		for _, v in ipairs(workspace:GetDescendants()) do
+			if v.Name == "Coin_Server" then coinSet[v] = true end
+		end
+	end
+
+	local function startCoinWatcher()
+		if coinConnAdded then coinConnAdded:Disconnect() end
+		if coinConnRemoving then coinConnRemoving:Disconnect() end
+		coinConnAdded = workspace.DescendantAdded:Connect(function(v)
+			if v.Name == "Coin_Server" then coinSet[v] = true end
+		end)
+		coinConnRemoving = workspace.DescendantRemoving:Connect(function(v)
+			if coinSet[v] then coinSet[v] = nil end
+		end)
+	end
+
+	initCoinCache()
+	startCoinWatcher()
+
+	local function refreshCoins()
+		local now = os.clock()
+		for coin, expiry in pairs(coinBlacklist) do
+			if now > expiry then coinBlacklist[coin] = nil end
+		end
+	end
+
+	local function getNearestCoin(): Instance?
+		if not rootPart then return nil end
+		local best: Instance? = nil
+		local bestDist = math.huge
+		local myPos = rootPart.Position
+		for coin in pairs(coinSet) do
+			if not isCoinBlacklisted(coin) then
+				local d = (getPos(coin) - myPos).Magnitude
+				if d < bestDist and d < LOBBY_IGNORE_DISTANCE then
+					bestDist = d; best = coin
+				end
+			end
+		end
+		return best
+	end
+
+	-- ================= PATH =================
+	local function computePath(from: Vector3, to: Vector3): Path?
+		if (to - from).Magnitude > MAX_PATH_DISTANCE then return nil end
+		local ok, path = pcall(function()
+			local p = PathfindingService:CreatePath({
+				AgentRadius = 1.8, AgentHeight = 5, AgentCanJump = true,
+				AgentJumpHeight = 12, AgentMaxSlope = 50, WaypointSpacing = 2,
+			})
+			p:ComputeAsync(from, to)
+			if p.Status == Enum.PathStatus.Success then return p end
+			return nil
+		end)
+		if not ok then return nil end
+		return path
+	end
+
+	local function shouldForceDrop(targetPos: Vector3): boolean
+		if not rootPart then return false end
+		if rootPart.Position.Y - targetPos.Y < DROP_HEIGHT_ALLOW then return false end
+		local localRay = RaycastParams.new()
+		localRay.FilterDescendantsInstances = { player.Character }
+		localRay.FilterType = Enum.RaycastFilterType.Blacklist
+		return workspace:Raycast(rootPart.Position, rootPart.CFrame.LookVector * DROP_CHECK_DISTANCE, localRay) == nil
+	end
+
+	-- ================= MOVEMENT =================
+	local activeTween: Tween?
+	local activePlatformTween: Tween?
+	local tweenPlatform: Part?
+	local TWEEN_PLATFORM_SIZE  = Vector3.new(6, 1, 6)
+	local TWEEN_PLATFORM_COLOR = Color3.fromRGB(57, 255, 20)
+
+	local function destroyTweenPlatform()
+		if activePlatformTween then activePlatformTween:Cancel(); activePlatformTween = nil end
+		if tweenPlatform then tweenPlatform:Destroy(); tweenPlatform = nil end
+	end
+
+	local function getUnderFeetOffset(): number
+		if not humanoid or not rootPart then return 3 end
+		return humanoid.HipHeight + rootPart.Size.Y * 0.5 + 0.5
+	end
+
+	local function getTweenPlatformPosition(): Vector3?
+		if not rootPart or not humanoid then return nil end
+		return rootPart.Position - Vector3.new(0, getUnderFeetOffset(), 0)
+	end
+
+	local function ensureTweenPlatform()
+		if moveMode ~= "Tween" then destroyTweenPlatform(); return end
+		if not rootPart or not humanoid then destroyTweenPlatform(); return end
+		if not tweenPlatform then
+			local part = Instance.new("Part")
+			part.Name = "TweenFloatPlatform"; part.Size = TWEEN_PLATFORM_SIZE
+			part.Anchored = true; part.CanCollide = true; part.CanQuery = false; part.CanTouch = false
+			part.Material = Enum.Material.Neon; part.Color = TWEEN_PLATFORM_COLOR
+			part.Transparency = 1; part.TopSurface = Enum.SurfaceType.Smooth; part.BottomSurface = Enum.SurfaceType.Smooth
+			part.Parent = workspace; tweenPlatform = part
+		end
+		if not activePlatformTween or activePlatformTween.PlaybackState ~= Enum.PlaybackState.Playing then
+			local p = getTweenPlatformPosition()
+			if p then tweenPlatform.CFrame = CFrame.new(p) end
+		end
+	end
+
+	local function safeMoveTo(pos: Vector3, timeout: number): boolean
+		if not humanoid or not rootPart then return false end
+		humanoid:MoveTo(pos)
+		local start = os.clock()
+		while os.clock() - start < timeout do
+			if not scriptEnabled or not autoFarm then return false end
+			if (rootPart.Position - pos).Magnitude < 4 then return true end
+			task.wait(0.05)
+		end
+		return false
+	end
+
+	local function moveTo(target: Vector3, path: Path?): boolean
+		if not humanoid or not rootPart then return false end
+		if moveMode == "Tween" then
+			ensureTweenPlatform()
+			if activeTween then activeTween:Cancel() end
+			if activePlatformTween then activePlatformTween:Cancel() end
+			local dist = (rootPart.Position - target).Magnitude
+			local travelTime = math.max(dist / tweenSpeed, 0.05)
+			local tweenTarget = target + Vector3.new(0, tweenYOffset, 0)
+			if tweenPlatform then
+				activePlatformTween = TweenService:Create(tweenPlatform, TweenInfo.new(travelTime, Enum.EasingStyle.Linear),
+					{ CFrame = CFrame.new(tweenTarget - Vector3.new(0, getUnderFeetOffset(), 0)) })
+				activePlatformTween:Play()
+			end
+			activeTween = TweenService:Create(rootPart, TweenInfo.new(travelTime, Enum.EasingStyle.Linear), { CFrame = CFrame.new(tweenTarget) })
+			activeTween:Play(); activeTween.Completed:Wait()
+			if tweenPlatform then
+				local fp = getTweenPlatformPosition()
+				if fp then tweenPlatform.CFrame = CFrame.new(fp) end
+			end
+			return true
+		end
+		if moveMode == "Walk" then return safeMoveTo(target, 2) end
+		if moveMode == "Pathfinding" and path then
+			local waypoints = path:GetWaypoints()
+			for i, wp in ipairs(waypoints) do
+				if not scriptEnabled or not autoFarm then return false end
+				local targetPos = wp.Position
+				if i < #waypoints then
+					local delta = waypoints[i+1].Position - targetPos
+					if delta.Magnitude > 0 then targetPos += delta.Unit * 1.5 end
+				end
+				if wp.Action == Enum.PathWaypointAction.Jump then humanoid.Jump = true end
+				if not safeMoveTo(targetPos, 2.5) then return false end
+			end
+			return true
+		end
+		return false
+	end
+
+	RunService.RenderStepped:Connect(function()
+		if not scriptEnabled then destroyTweenPlatform(); return end
+		if moveMode == "Tween" then ensureTweenPlatform() else destroyTweenPlatform() end
+	end)
+
+	-- ================= AUTO JUMP =================
+	RunService.RenderStepped:Connect(function()
+		if not scriptEnabled or not autoJumpEnabled or not humanoid or not rootPart then return end
+		if humanoid:GetState() == Enum.HumanoidStateType.Climbing then return end
+		if tick() - lastJump < JUMP_COOLDOWN then return end
+		if humanoid.FloorMaterial == Enum.Material.Air then return end
+		local result = workspace:Raycast(rootPart.Position + Vector3.new(0, RAY_HEIGHT_OFFSET, 0), rootPart.CFrame.LookVector * RAY_DISTANCE, rayParams)
+		if result and result.Instance and result.Instance.CanCollide then
+			humanoid:ChangeState(Enum.HumanoidStateType.Jumping); lastJump = tick()
+		end
+	end)
+
+	-- ================= AUTO WALK IF IDLE =================
+	local idleTimer = 0
+	local isAutoMoving = false
+	local lastPosition: Vector3? = nil
+
+	local function getRandomDir()
+		local a = math.random() * math.pi * 2
+		return Vector3.new(math.cos(a), 0, math.sin(a))
+	end
+
+	local function isWallAhead(dir: Vector3): boolean
+		if not rootPart then return false end
+		local r = workspace:Raycast(rootPart.Position, dir.Unit * WALL_DETECTION_DISTANCE, rayParams)
+		return r ~= nil and r.Instance ~= nil and r.Instance.CanCollide
+	end
+
+	RunService.Heartbeat:Connect(function(dt)
+		if not scriptEnabled or not autoWalkIfIdleEnabled then
+			idleTimer = 0; isAutoMoving = false
+			if rootPart then lastPosition = rootPart.Position end; return
+		end
+		if not humanoid or not rootPart then return end
+		if not lastPosition then lastPosition = rootPart.Position end
+		if (rootPart.Position - lastPosition).Magnitude > POSITION_EPSILON then
+			idleTimer = 0; isAutoMoving = false
+		else
+			idleTimer += dt
+		end
+		lastPosition = rootPart.Position
+		if idleTimer >= IDLE_TIME and not isAutoMoving then
+			isAutoMoving = true; idleTimer = 0
+			task.spawn(function()
+				if not humanoid or not rootPart then isAutoMoving = false; return end
+				local dir = getRandomDir()
+				for _ = 1, 8 do if not isWallAhead(dir) then break end; dir = getRandomDir() end
+				humanoid:MoveTo(rootPart.Position + dir.Unit * MOVE_DISTANCE)
+				humanoid.MoveToFinished:Wait(); isAutoMoving = false
+			end)
+		end
+	end)
+
+	-- ================= AUTO RESET ON FULL BAG =================
+	local bagResetDebounce = false
+	task.spawn(function()
+		local ok, coinEvent = pcall(function()
+			return ReplicatedStorage:WaitForChild("Remotes",10):WaitForChild("Gameplay",10):WaitForChild("CoinCollected",10)
+		end)
+		if not ok or not coinEvent then warn("AutoCNS: CoinCollected remote not found."); return end
+		coinEvent.OnClientEvent:Connect(function(_, current, max)
+			if not autoResetOnFullBag or bagResetDebounce or current < max then return end
+			bagResetDebounce = true
+			local char = player.Character or player.CharacterAdded:Wait()
+			local hum  = char:FindFirstChildOfClass("Humanoid")
+			local root = char:FindFirstChild("HumanoidRootPart")
+			if moveMode == "Tween" and root then
+				if activeTween then activeTween:Cancel(); activeTween = nil end
+				if activePlatformTween then activePlatformTween:Cancel(); activePlatformTween = nil end
+				local was = autoFarm; autoFarm = false
+				root.CFrame = CFrame.new(0, 10000, 0); task.wait(1); autoFarm = was
+			end
+			if hum then hum.Health = 0 end
+			task.wait(5); bagResetDebounce = false
+		end)
+	end)
+
+	-- ================= NOCLIP =================
+	local noclipDisabledParts: { [BasePart]: true } = {}
+	local NOCLIP_ZONE = Vector3.new(20, 20, 20)
+	local noclipOverlap = OverlapParams.new()
+	noclipOverlap.FilterType = Enum.RaycastFilterType.Blacklist
+
+	local function updateNoclipFilter()
+		local ex: { Instance } = {}
+		if player.Character then table.insert(ex, player.Character) end
+		if tweenPlatform then table.insert(ex, tweenPlatform) end
+		noclipOverlap.FilterDescendantsInstances = ex
+	end
+
+	local function noclipScanOnce()
+		if not rootPart then return end
+		updateNoclipFilter()
+		for _, part in ipairs(workspace:GetPartBoundsInBox(CFrame.new(rootPart.Position), NOCLIP_ZONE, noclipOverlap)) do
+			if part == tweenPlatform then continue end
+			if player.Character and part:IsDescendantOf(player.Character) then continue end
+			if part.CanCollide and not noclipDisabledParts[part] then
+				part.CanCollide = false; noclipDisabledParts[part] = true
+			end
+		end
+	end
+
+	local function restoreNoclipParts()
+		for part in pairs(noclipDisabledParts) do
+			pcall(function() if part.Parent then part.CanCollide = true end end)
+		end
+		table.clear(noclipDisabledParts)
+	end
+
+	local function startNoclipLoop()
+		task.spawn(function()
+			while noclipEnabled and scriptEnabled do noclipScanOnce(); task.wait(0.1) end
+		end)
+	end
+
+	-- ================= ANTI FLING =================
+	local antiFlingDisabledParts: { [BasePart]: true } = {}
+
+	local function applyAntiFling()
+		for _, op in ipairs(Players:GetPlayers()) do
+			if op == player or not op.Character then continue end
+			for _, part in ipairs(op.Character:GetDescendants()) do
+				if part:IsA("BasePart") and part.CanCollide and not antiFlingDisabledParts[part] then
+					part.CanCollide = false; antiFlingDisabledParts[part] = true
+				end
+			end
+		end
+	end
+
+	local function restoreAntiFling()
+		for part in pairs(antiFlingDisabledParts) do
+			pcall(function() if part.Parent then part.CanCollide = true end end)
+		end
+		table.clear(antiFlingDisabledParts)
+	end
+
+	task.spawn(function()
+		while scriptEnabled do
+			if antiFlingEnabled then applyAntiFling() end
+			task.wait(1)
+		end
+	end)
+
+	Players.PlayerAdded:Connect(function(p)
+		p.CharacterAdded:Connect(function(char)
+			if not antiFlingEnabled then return end
+			task.wait(1)
+			for _, part in ipairs(char:GetDescendants()) do
+				if part:IsA("BasePart") and part.CanCollide and not antiFlingDisabledParts[part] then
+					part.CanCollide = false; antiFlingDisabledParts[part] = true
+				end
+			end
+		end)
+	end)
+
+	-- ================= SECURITY SHUTDOWN =================
+	local function securityShutdown(reason: string)
+		print("AutoCNS SECURITY:", reason)
+		autoFarm = false; noclipEnabled = false
+		restoreNoclipParts()
+		if activeTween then activeTween:Cancel() end
+		if activePlatformTween then activePlatformTween:Cancel() end
+		destroyTweenPlatform(); scriptEnabled = false
+		-- prévient l'interface (toast + remise à OFF des toggles)
+		if Bridge.onSecurity then pcall(Bridge.onSecurity, reason) end
+	end
+
+	-- ================= BLACKLIST CHECK =================
+	local function isUserBlacklisted(uid: number): boolean
+		for _, id in ipairs(BLACKLISTED_USER_IDS) do if id == uid then return true end end
+		return false
+	end
+
+	task.spawn(function()
+		while true do
+			task.wait(2); if not scriptEnabled then break end
+			if not blacklistedPlayerEnabled then continue end
+			for _, p in ipairs(Players:GetPlayers()) do
+				if p == player then continue end
+				if isUserBlacklisted(p.UserId) then
+					warn("INTRUDER DETECTED")
+					securityShutdown("Blacklisted: " .. p.Name .. " (" .. tostring(p.UserId) .. ")")
+					break
+				end
+			end
+		end
+	end)
+
+	-- ================= ANTI UNKNOWN PLAYER =================
+	local knownPlayerIds: { [number]: true } = {}
+	local antiUnknownInitialized = false
+
+	local function initAntiUnknown()
+		table.clear(knownPlayerIds)
+		for _, p in ipairs(Players:GetPlayers()) do knownPlayerIds[p.UserId] = true end
+		antiUnknownInitialized = true
+	end
+
+	task.spawn(function()
+		while true do
+			task.wait(2); if not scriptEnabled then break end
+			if not antiUnknownPlayerEnabled then antiUnknownInitialized = false; continue end
+			if not antiUnknownInitialized then initAntiUnknown(); continue end
+			local cur: { [number]: true } = {}
+			for _, p in ipairs(Players:GetPlayers()) do cur[p.UserId] = true end
+			for id in pairs(cur) do
+				if not knownPlayerIds[id] then
+					warn("INTRUDER DETECTED")
+					securityShutdown("Unknown player joined: " .. tostring(id)); break
+				end
+			end
+			if not scriptEnabled then break end
+			for id in pairs(knownPlayerIds) do
+				if not cur[id] then securityShutdown("Player left (Anti Unknown triggered)"); break end
+			end
+		end
+	end)
+
+	-- ================= FARM LOOP =================
+	task.spawn(function()
+		local lockedTarget: Instance?
+		local targetStart = 0
+		local localLastPos: Vector3?
+		local lastMove = 0
+		local lastBlacklistClean = 0
+		while scriptEnabled do
+			task.wait(0.05)
+			local ok, err = pcall(function()
+				if not autoFarm or not humanoid or not rootPart then lockedTarget = nil; return end
+				local now = os.clock()
+				if now - lastBlacklistClean >= 1 then refreshCoins(); lastBlacklistClean = now end
+				if not lockedTarget or isCoinBlacklisted(lockedTarget) then
+					lockedTarget = getNearestCoin()
+					if not lockedTarget then return end
+					targetStart = os.clock(); localLastPos = rootPart.Position; lastMove = os.clock()
+				end
+				local coin = lockedTarget
+				if not coin then return end
+				if os.clock() - targetStart > MAX_TARGET_TIME then
+					coinBlacklist[coin] = os.clock() + blacklistDuration; lockedTarget = nil; return
+				end
+				if localLastPos and (rootPart.Position - localLastPos).Magnitude > STUCK_DISTANCE then
+					localLastPos = rootPart.Position; lastMove = os.clock()
+				elseif os.clock() - lastMove > STUCK_TIME then
+					if tpIfStuck then rootPart.CFrame = CFrame.new(getPos(coin)) end
+					coinBlacklist[coin] = os.clock() + blacklistDuration; lockedTarget = nil; return
+				end
+				local path
+				if moveMode == "Pathfinding" then
+					path = computePath(rootPart.Position, getPos(coin))
+					if not path and shouldForceDrop(getPos(coin)) then humanoid:MoveTo(getPos(coin)); return end
+					if not path then coinBlacklist[coin] = os.clock() + 2; lockedTarget = nil; return end
+				end
+				moveTo(getPos(coin), path)
+				coinBlacklist[coin] = os.clock() + blacklistDuration; lockedTarget = nil
+				if postCollectDelay > 0 then task.wait(postCollectDelay) end
+			end)
+			if not ok then warn("Autofarm error:", err); task.wait(0.5) end
+		end
+	end)
+
+	-- =================================================================================
+	--  BRIDGE : fonctions appelées par les boutons de l'interface
+	-- =================================================================================
+	function Bridge.setAutoFarm(v: boolean)
+		autoFarm = v
+	end
+
+	function Bridge.setNoclip(v: boolean)
+		noclipEnabled = v
+		if v then startNoclipLoop() else restoreNoclipParts() end
+	end
+
+	function Bridge.setAutoReset(v: boolean)
+		autoResetOnFullBag = v
+	end
+
+	function Bridge.setMoveMode(v: string)
+		moveMode = v
+		if moveMode ~= "Tween" then destroyTweenPlatform() end
+	end
+
+	function Bridge.setTpIfStuck(v: boolean)
+		tpIfStuck = v
+	end
+
+	function Bridge.setAutoWalkIfIdle(v: boolean)
+		autoWalkIfIdleEnabled = v
+	end
+
+	function Bridge.setAutoJump(v: boolean)
+		autoJumpEnabled = v
+	end
+
+	function Bridge.setTweenSpeed(v: number)
+		tweenSpeed = math.max(math.floor(v), 1)
+	end
+
+	function Bridge.setPostCollectDelay(v: number)
+		postCollectDelay = v
+	end
+
+	function Bridge.setTweenYOffset(v: number)
+		tweenYOffset = v
+	end
+
+	function Bridge.setAntiUnknown(v: boolean)
+		antiUnknownPlayerEnabled = v
+		if v then initAntiUnknown() else antiUnknownInitialized = false end
+	end
+
+	function Bridge.setBlacklisted(v: boolean)
+		blacklistedPlayerEnabled = v
+	end
+
+	function Bridge.setAntiFling(v: boolean)
+		antiFlingEnabled = v
+		if not v then restoreAntiFling() end
+	end
+
+	function Bridge.getDeaths(): number
+		return deathCount
+	end
+
+	-- "Stop the script" / destruction de l'UI
+	function Bridge.shutdown()
+		scriptEnabled = false
+		autoFarm = false; autoJumpEnabled = false; autoWalkIfIdleEnabled = false
+		autoResetOnFullBag = false; noclipEnabled = false; antiFlingEnabled = false
+		restoreNoclipParts(); restoreAntiFling()
+		if activeTween then activeTween:Cancel() end
+		if activePlatformTween then activePlatformTween:Cancel() end
+		destroyTweenPlatform()
+	end
+end
+
+-- =====================================================================================
+--  2) INTERFACE : disposition d'ACNS (sidebar + panel) + effets d'Aura & VFX
+-- =====================================================================================
+do
+	local Players = game:GetService("Players")
+	local TweenService = game:GetService("TweenService")
+	local UserInputService = game:GetService("UserInputService")
+	local RunService = game:GetService("RunService")
+	local TextService = game:GetService("TextService")
+
+	local player = Players.LocalPlayer
+
+	-- ================= CONFIG =================
+	local CONFIG = {
+		title = "AutoCNS",
+		author = "by RenHatsuro",
+		toggleKey = Enum.KeyCode.RightShift,
+		windowTransparency = 0.9, -- 0.9 = très transparent. Mets 0.2 pour une fenêtre plus opaque.
+		ascii = {                  -- réglages de l'aura
+			enabled = true,
+			textSize = 13,
+			padding = 80,          -- épaisseur de l'aura autour de la fenêtre (px)
+			fps = 30,
+			ramp = " .,:;-=+*x#%@",
+			color = Color3.fromRGB(255, 255, 255),
+			mouse = true,          -- onde qui suit la souris
+		},
+		scramble = {
+			pageDuration = 0.45,   -- durée du brouillage de chaque texte quand on change d'onglet
+			stagger = 0.035,       -- décalage entre deux textes
+			maxDelay = 0.45,
+		},
+	}
+
+	-- ================= PALETTE =================
+	local C_BG         = Color3.fromRGB(0, 0, 0)
+	local C_ROW        = Color3.fromRGB(21, 21, 21)
+	local C_CARD       = Color3.fromRGB(52, 52, 52)
+	local C_ACTIVE     = Color3.fromRGB(255, 0, 0)
+	local C_ACCENT     = Color3.fromRGB(255, 0, 0)
+	local C_TOGGLE_OFF = Color3.fromRGB(72, 72, 60)
+	local C_TXT        = Color3.fromRGB(51, 199, 202)
+	local C_SUBTXT     = Color3.fromRGB(0, 213, 255)
+	local C_SEP        = Color3.fromRGB(0, 0, 0)
+	local C_TITLE      = Color3.fromRGB(200, 205, 225)
+	local C_STROKE     = Color3.fromRGB(60, 65, 85)
+	local C_WHITE      = Color3.fromRGB(255, 255, 255)
+	local C_DANGER     = Color3.fromRGB(220, 0, 0)
+
+	-- ================= HELPERS =================
+	local function create(class, props, children)
+		local ok, inst = pcall(Instance.new, class)
+		if not ok then
+			return nil
+		end
+		local parent
+		for k, v in pairs(props or {}) do
+			if k == "Parent" then
+				parent = v
+			else
+				pcall(function()
+					inst[k] = v
+				end)
+			end
+		end
+		for _, child in pairs(children or {}) do
+			if child then
+				child.Parent = inst
+			end
+		end
+		if parent then
+			inst.Parent = parent
+		end
+		return inst
+	end
+
+	local function corner(r)
+		return create("UICorner", {CornerRadius = UDim.new(0, r or 8)})
+	end
+
+	local function stroke(color, transparency, thickness)
+		return create("UIStroke", {Color = color or C_STROKE, Transparency = transparency or 0, Thickness = thickness or 1})
+	end
+
+	local function tween(obj, t, props, style, dir)
+		local tw = TweenService:Create(obj, TweenInfo.new(t, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out), props)
+		tw:Play()
+		return tw
+	end
+
+	local function isClick(input)
+		local t = input.UserInputType
+		return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
+	end
+
+	local connections = {}
+	local function bind(signal, fn)
+		local c = signal:Connect(fn)
+		table.insert(connections, c)
+		return c
+	end
+
+	local function mount(gui)
+		local parents = {}
+		if typeof(gethui) == "function" then
+			table.insert(parents, gethui)
+		end
+		table.insert(parents, function()
+			return game:GetService("CoreGui")
+		end)
+		table.insert(parents, function()
+			return player:WaitForChild("PlayerGui")
+		end)
+		for _, get in ipairs(parents) do
+			if pcall(function() gui.Parent = get() end) and gui.Parent then
+				return
+			end
+		end
+	end
+
+	-- ================= FONDU =================
+	local fadeProps = {
+		{"GuiObject", "BackgroundTransparency"},
+		{"TextLabel", "TextTransparency"},
+		{"TextButton", "TextTransparency"},
+		{"TextBox", "TextTransparency"},
+		{"ImageLabel", "ImageTransparency"},
+		{"ImageButton", "ImageTransparency"},
+		{"ScrollingFrame", "ScrollBarImageTransparency"},
+		{"UIStroke", "Transparency"},
+		{"UIShadow", "Transparency"},
+	}
+
+	local originals = {}   -- surtout pas en weak : les wrappers d'instances seraient collectés
+	local fadeExclude = {}
+
+	local function getOriginal(inst)
+		local o = originals[inst]
+		if o then
+			return o
+		end
+		o = {}
+		for _, pair in ipairs(fadeProps) do
+			local okIs, is = pcall(inst.IsA, inst, pair[1])
+			if okIs and is then
+				local ok, v = pcall(function()
+					return inst[pair[2]]
+				end)
+				if ok and type(v) == "number" then
+					o[pair[2]] = v
+				end
+			end
+		end
+		originals[inst] = o
+		inst.Destroying:Connect(function()
+			originals[inst] = nil
+		end)
+		return o
+	end
+
+	local function isExcluded(inst)
+		for _, root in ipairs(fadeExclude) do
+			if inst == root or inst:IsDescendantOf(root) then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function fade(root, alpha, t)
+		local list = root:GetDescendants()
+		table.insert(list, root)
+		for _, inst in ipairs(list) do
+			if not isExcluded(inst) then
+				local goal
+				for prop, v in pairs(getOriginal(inst)) do
+					goal = goal or {}
+					goal[prop] = v + (1 - v) * (1 - alpha)
+				end
+				if goal then
+					if t and t > 0 then
+						tween(inst, t, goal, Enum.EasingStyle.Quad)
+					else
+						for p, v in pairs(goal) do
+							pcall(function()
+								inst[p] = v
+							end)
+						end
+					end
+				end
+			end
+		end
+	end
+
+	-- ================= TEXTE BROUILLÉ (scramble, compatible UTF-8) =================
+	local glyphs = "!<>-_\\/[]{}=+*^?#@$%&"
+	local scrambleIds = {}
+	local scrambling = {}
+	local finalText = {}   -- texte "officiel" de chaque label suivi
+
+	local function splitChars(s)
+		local t = {}
+		local ok = pcall(function()
+			for _, c in utf8.codes(s) do
+				t[#t + 1] = utf8.char(c)
+			end
+		end)
+		if not ok then
+			t = {}
+			for i = 1, #s do
+				t[i] = s:sub(i, i)
+			end
+		end
+		return t
+	end
+
+	local function scramble(lbl, text, duration, delay)
+		local id = (scrambleIds[lbl] or 0) + 1
+		scrambleIds[lbl] = id
+		scrambling[lbl] = true
+		local list = splitChars(text)
+		local len = #list
+		task.spawn(function()
+			if delay and delay > 0 then
+				lbl.Text = ""
+				task.wait(delay)
+			end
+			local start = os.clock()
+			while lbl.Parent and scrambleIds[lbl] == id do
+				local p = (os.clock() - start) / duration
+				if p >= 1 then
+					break
+				end
+				local revealed = math.floor(p * len)
+				local out = table.create(len)
+				for i = 1, len do
+					local ch = list[i]
+					if i <= revealed or ch == " " then
+						out[i] = ch
+					else
+						local r = math.random(1, #glyphs)
+						out[i] = glyphs:sub(r, r)
+					end
+				end
+				lbl.Text = table.concat(out)
+				task.wait(0.03)
+			end
+			if scrambleIds[lbl] == id then
+				lbl.Text = finalText[lbl] or text
+				scrambling[lbl] = false
+			end
+		end)
+	end
+
+	-- soft = true : si un scramble est en cours, on met juste à jour le texte final.
+	local function setText(lbl, text, soft)
+		finalText[lbl] = text
+		if soft and scrambling[lbl] then
+			return
+		end
+		scrambleIds[lbl] = (scrambleIds[lbl] or 0) + 1
+		scrambling[lbl] = false
+		lbl.Text = text
+	end
+
+	local function label(props)
+		props.BackgroundTransparency = 1
+		props.BorderSizePixel = 0
+		props.Font = props.Font or Enum.Font.GothamSemibold
+		props.TextSize = props.TextSize or 14
+		props.TextScaled = false
+		props.TextColor3 = props.TextColor3 or C_TXT
+		props.TextXAlignment = props.TextXAlignment or Enum.TextXAlignment.Left
+		local l = create("TextLabel", props)
+		finalText[l] = l.Text
+		return l
+	end
+
+	local function scrambleContainer(root)
+		local rank = 0
+		for _, d in ipairs(root:GetDescendants()) do
+			if d:IsA("TextLabel") and finalText[d] and finalText[d] ~= "" then
+				local delay = math.min(rank * CONFIG.scramble.stagger, CONFIG.scramble.maxDelay)
+				scramble(d, finalText[d], CONFIG.scramble.pageDuration, delay)
+				rank += 1
+			end
+		end
+	end
+
+	-- ================= GUI DE BASE =================
+	local ScreenGui = create("ScreenGui", {
+		Name = "AutoCNS_UI",
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		DisplayOrder = 999,
+	})
+	mount(ScreenGui)
+
+	local BurnGui = create("ScreenGui", {
+		Name = "AutoCNS_Burn",
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		DisplayOrder = 9999,
+	})
+	mount(BurnGui)
+
+	local AsciiHolder = create("Frame", {
+		Name = "AsciiBackdrop",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		Visible = false,
+		ZIndex = 1,
+		Parent = ScreenGui,
+	})
+
+	-- ================= FENÊTRE =================
+	local WIN_W, WIN_H = 680, 480
+	local TITLE_H = 44
+	local SIDEBAR_W = 180
+
+	local MainScale = create("UIScale", {Scale = 1})
+
+	local Window = create("Frame", {
+		Name = "Window",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(WIN_W, WIN_H),
+		BackgroundColor3 = C_BG,
+		BackgroundTransparency = CONFIG.windowTransparency,
+		BorderSizePixel = 0,
+		Visible = false,
+		ZIndex = 2,
+		Parent = ScreenGui,
+	}, {
+		corner(12),
+		create("UIShadow", {Transparency = 0.5, BlurRadius = UDim.new(0, 20)}), -- ignoré si UIShadow n'existe pas
+		stroke(C_STROKE, 0, 1),
+		MainScale,
+	})
+
+	-- Barre de titre
+	local TitleBar = create("Frame", {
+		Name = "TitleBar",
+		Size = UDim2.new(1, 0, 0, TITLE_H),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ZIndex = 5,
+		Parent = Window,
+	})
+
+	local TitleLabel = label({
+		Name = "Title",
+		Size = UDim2.new(0, 120, 1, 0),
+		Position = UDim2.fromOffset(16, 0),
+		Text = CONFIG.title,
+		Font = Enum.Font.GothamBold,
+		TextSize = 22,
+		ZIndex = 6,
+		Parent = TitleBar,
+	})
+
+	local AuthorLabel = label({
+		Name = "Author",
+		Size = UDim2.new(0, 180, 1, 0),
+		Position = UDim2.fromOffset(140, 0),
+		Text = CONFIG.author,
+		Font = Enum.Font.Gotham,
+		TextSize = 13,
+		TextColor3 = C_SUBTXT,
+		ZIndex = 6,
+		Parent = TitleBar,
+	})
+
+	local function pressFx(btn)
+		local scale = btn:FindFirstChildOfClass("UIScale") or create("UIScale", {Parent = btn})
+		btn.MouseButton1Down:Connect(function()
+			tween(scale, 0.08, {Scale = 0.9})
+		end)
+		btn.MouseButton1Up:Connect(function()
+			tween(scale, 0.35, {Scale = 1}, Enum.EasingStyle.Back)
+		end)
+		btn.MouseLeave:Connect(function()
+			tween(scale, 0.2, {Scale = 1})
+		end)
+	end
+
+	local function makeTitleBtn(xOff, txt, base, hover)
+		local btn = create("TextButton", {
+			Size = UDim2.fromOffset(28, 28),
+			Position = UDim2.new(1, xOff, 0.5, -14),
+			Text = txt,
+			Font = Enum.Font.GothamBold,
+			TextSize = 16,
+			TextColor3 = C_TXT,
+			BackgroundColor3 = base,
+			BackgroundTransparency = 0.35,
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+			ZIndex = 7,
+			Parent = TitleBar,
+		}, {corner(6)})
+		btn.MouseEnter:Connect(function()
+			tween(btn, 0.12, {BackgroundColor3 = hover, BackgroundTransparency = 0}, Enum.EasingStyle.Quad)
+		end)
+		btn.MouseLeave:Connect(function()
+			tween(btn, 0.12, {BackgroundColor3 = base, BackgroundTransparency = 0.35}, Enum.EasingStyle.Quad)
+		end)
+		pressFx(btn)
+		return btn
+	end
+
+	local CloseBtn = makeTitleBtn(-42, "X", Color3.fromRGB(106, 0, 0), Color3.fromRGB(185, 0, 0))
+	local MinBtn = makeTitleBtn(-78, "-", Color3.fromRGB(21, 21, 21), Color3.fromRGB(60, 60, 60))
+
+	local TitleSep = create("Frame", {
+		Size = UDim2.new(1, 0, 0, 1),
+		Position = UDim2.fromOffset(0, TITLE_H),
+		BackgroundColor3 = C_SEP,
+		BorderSizePixel = 0,
+		Parent = Window,
+	})
+
+	-- Sidebar
+	local Sidebar = create("ScrollingFrame", {
+		Name = "Sidebar",
+		Size = UDim2.new(0, SIDEBAR_W, 1, -TITLE_H - 1),
+		Position = UDim2.fromOffset(0, TITLE_H + 1),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 0,
+		CanvasSize = UDim2.fromOffset(0, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Parent = Window,
+	}, {
+		create("UIListLayout", {
+			Padding = UDim.new(0, 4),
+			HorizontalAlignment = Enum.HorizontalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
+		create("UIPadding", {
+			PaddingTop = UDim.new(0, 10), PaddingLeft = UDim.new(0, 8),
+			PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 10),
+		}),
+	})
+
+	local SideSep = create("Frame", {
+		Size = UDim2.new(0, 1, 1, -(TITLE_H + 1)),
+		Position = UDim2.new(0, SIDEBAR_W, 0, TITLE_H + 1),
+		BackgroundColor3 = C_SEP,
+		BorderSizePixel = 0,
+		Parent = Window,
+	})
+
+	-- Zone des pages (clippée pour que le glissement entre onglets reste propre)
+	local Panel = create("Frame", {
+		Name = "Panel",
+		Size = UDim2.new(1, -(SIDEBAR_W + 1), 1, -TITLE_H - 1),
+		Position = UDim2.new(0, SIDEBAR_W + 1, 0, TITLE_H + 1),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ClipsDescendants = true,
+		Parent = Window,
+	})
+
+	-- ================= TOAST =================
+	local ToastStroke = create("UIStroke", {Color = C_STROKE, Transparency = 1})
+	local Toast = create("TextLabel", {
+		Name = "Toast",
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, -14),
+		Size = UDim2.fromOffset(0, 28),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundColor3 = C_CARD,
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 14,
+		TextColor3 = C_TXT,
+		TextTransparency = 1,
+		Text = "",
+		ZIndex = 30,
+		Parent = Window,
+	}, {
+		corner(14),
+		create("UIPadding", {PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14)}),
+		ToastStroke,
+	})
+	table.insert(fadeExclude, Toast)
+
+	local toastId = 0
+	local function toast(text, color)
+		toastId += 1
+		local id = toastId
+		finalText[Toast] = text
+		Toast.TextColor3 = color or C_TXT
+		Toast.Position = UDim2.new(0.5, 0, 1, -6)
+		tween(Toast, 0.3, {BackgroundTransparency = 0.1, TextTransparency = 0, Position = UDim2.new(0.5, 0, 1, -14)})
+		tween(ToastStroke, 0.3, {Transparency = 0.4})
+		scramble(Toast, text, 0.25)
+		task.delay(1.8, function()
+			if id ~= toastId then
+				return
+			end
+			tween(Toast, 0.3, {BackgroundTransparency = 1, TextTransparency = 1})
+			tween(ToastStroke, 0.3, {Transparency = 1})
+		end)
+	end
+
+	-- ================= ÉTAT PUBLIC (miroir de l'état, lisible depuis l'extérieur) =================
+	local State = {
+		autoFarm = false,
+		noclip = false,
+		autoReset = false,
+		moveMode = "Pathfinding",
+		tpIfStuck = false,
+		autoWalkIfIdle = false,
+		autoJump = false,
+		tweenSpeed = 22,
+		postCollectDelay = 0,
+		tweenYOffset = 0,
+		antiUnknownPlayer = false,
+		blacklistedPlayers = true,
+		antiFling = true,
+	}
+
+	-- ================= PAGES & SIDEBAR =================
+	local pages = {}
+	local currentPage
+
+	local function showPage(index, instant)
+		if index == currentPage then
+			return
+		end
+		local prev = currentPage
+		local dir = (prev and index < prev) and -1 or 1
+		currentPage = index
+
+		for i, p in ipairs(pages) do
+			local active = i == index
+			if instant then
+				p.button.BackgroundTransparency = active and 0.65 or 1
+				p.label.TextColor3 = active and C_TXT or C_SUBTXT
+				p.accent.Size = active and UDim2.fromOffset(3, 22) or UDim2.fromOffset(3, 0)
+			else
+				tween(p.button, 0.15, {BackgroundTransparency = active and 0.65 or 1}, Enum.EasingStyle.Quad)
+				tween(p.label, 0.15, {TextColor3 = active and C_TXT or C_SUBTXT}, Enum.EasingStyle.Quad)
+				tween(p.accent, 0.25, {Size = active and UDim2.fromOffset(3, 22) or UDim2.fromOffset(3, 0)})
+			end
+		end
+
+		if prev then
+			local old = pages[prev].frame
+			if instant then
+				old.Visible = false
+			else
+				fade(old, 0, 0.15)
+				tween(old, 0.25, {Position = UDim2.fromScale(-0.06 * dir, 0)})
+				task.delay(0.25, function()
+					if pages[currentPage].frame ~= old then
+						old.Visible = false
+					end
+				end)
+			end
+		end
+
+		local new = pages[index].frame
+		new.Visible = true
+		if instant then
+			new.Position = UDim2.new()
+		else
+			new.Position = UDim2.fromScale(0.06 * dir, 0)
+			fade(new, 0, 0)
+			tween(new, 0.4, {Position = UDim2.new()})
+			fade(new, 1, 0.3)
+			scrambleContainer(new)
+		end
+	end
+
+	local function newPage(name)
+		local index = #pages + 1
+
+		local frame = create("ScrollingFrame", {
+			Name = name,
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Visible = false,
+			ScrollBarThickness = 4,
+			ScrollBarImageColor3 = Color3.fromRGB(80, 88, 120),
+			CanvasSize = UDim2.fromOffset(0, 0),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			ScrollingDirection = Enum.ScrollingDirection.Y,
+			Parent = Panel,
+		}, {
+			create("UIListLayout", {
+				Padding = UDim.new(0, 6),
+				SortOrder = Enum.SortOrder.LayoutOrder,
+				HorizontalAlignment = Enum.HorizontalAlignment.Left,
+			}),
+			create("UIPadding", {
+				PaddingTop = UDim.new(0, 14), PaddingLeft = UDim.new(0, 14),
+				PaddingRight = UDim.new(0, 14), PaddingBottom = UDim.new(0, 14),
+			}),
+		})
+
+		local btn = create("TextButton", {
+			Name = name,
+			Size = UDim2.new(1, 0, 0, 40),
+			BackgroundColor3 = C_ROW,
+			BackgroundTransparency = 1,
+			AutoButtonColor = false,
+			LayoutOrder = index,
+			BorderSizePixel = 0,
+			Text = "",
+			Parent = Sidebar,
+		}, {corner(8)})
+
+		local accent = create("Frame", {
+			Name = "Accent",
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, 0, 0.5, 0),
+			Size = UDim2.fromOffset(3, 0),
+			BackgroundColor3 = C_ACTIVE,
+			BorderSizePixel = 0,
+			Parent = btn,
+		}, {corner(2)})
+
+		local lbl = label({
+			Name = "Label",
+			Size = UDim2.new(1, -20, 1, 0),
+			Position = UDim2.fromOffset(14, 0),
+			Text = name,
+			TextColor3 = C_SUBTXT,
+			Parent = btn,
+		})
+
+		btn.MouseEnter:Connect(function()
+			if currentPage == index then return end
+			tween(btn, 0.12, {BackgroundTransparency = 0.65}, Enum.EasingStyle.Quad)
+			tween(lbl, 0.12, {TextColor3 = C_TXT}, Enum.EasingStyle.Quad)
+		end)
+		btn.MouseLeave:Connect(function()
+			if currentPage == index then return end
+			tween(btn, 0.12, {BackgroundTransparency = 1}, Enum.EasingStyle.Quad)
+			tween(lbl, 0.12, {TextColor3 = C_SUBTXT}, Enum.EasingStyle.Quad)
+		end)
+		btn.MouseButton1Click:Connect(function()
+			showPage(index)
+		end)
+
+		local page = {frame = frame, button = btn, accent = accent, label = lbl, order = 0}
+		pages[index] = page
+		return page
+	end
+
+	-- ================= FABRIQUES DE CONTRÔLES (style ACNS) =================
+	local function nextOrder(page)
+		page.order += 1
+		return page.order
+	end
+
+	local function newRow(page, height, clickable)
+		local row = create("Frame", {
+			Name = "Row",
+			Size = UDim2.new(1, 0, 0, height),
+			BackgroundColor3 = C_ROW,
+			BackgroundTransparency = 0.35,
+			BorderSizePixel = 0,
+			LayoutOrder = nextOrder(page),
+			Parent = page.frame,
+		}, {corner(8)})
+
+		local hoverTarget = row
+		local clicker
+		if clickable then
+			clicker = create("TextButton", {
+				Size = UDim2.fromScale(1, 1),
+				BackgroundTransparency = 1,
+				Text = "",
+				AutoButtonColor = false,
+				ZIndex = 3,
+				Parent = row,
+			})
+			hoverTarget = clicker
+		end
+		hoverTarget.MouseEnter:Connect(function()
+			tween(row, 0.12, {BackgroundTransparency = 0.15}, Enum.EasingStyle.Quad)
+		end)
+		hoverTarget.MouseLeave:Connect(function()
+			tween(row, 0.12, {BackgroundTransparency = 0.35}, Enum.EasingStyle.Quad)
+		end)
+		return row, clicker
+	end
+
+	local function header(page, text)
+		return label({
+			Name = "Header",
+			Size = UDim2.new(1, 0, 0, 24),
+			Text = text,
+			Font = Enum.Font.GothamBold,
+			TextSize = 13,
+			TextColor3 = C_TITLE,
+			LayoutOrder = nextOrder(page),
+			Parent = page.frame,
+		})
+	end
+
+	local function note(page, text)
+		return label({
+			Name = "Note",
+			Size = UDim2.new(1, 0, 0, 40),
+			Text = text,
+			TextColor3 = C_SUBTXT,
+			LayoutOrder = nextOrder(page),
+			Parent = page.frame,
+		})
+	end
+
+	local function toggle(page, text, sub, init, onChange)
+		local row, clicker = newRow(page, sub and 54 or 44, true)
+
+		label({
+			Name = "Main",
+			Size = UDim2.new(1, -70, 0, 20),
+			Position = UDim2.fromOffset(14, sub and 8 or 12),
+			Text = text,
+			Parent = row,
+		})
+		if sub then
+			label({
+				Name = "Sub",
+				Size = UDim2.new(1, -70, 0, 16),
+				Position = UDim2.fromOffset(14, 30),
+				Text = sub,
+				Font = Enum.Font.Gotham,
+				TextSize = 11,
+				TextColor3 = C_SUBTXT,
+				Parent = row,
+			})
+		end
+
+		local TRACK_W, TRACK_H, THUMB = 44, 24, 18
+		local track = create("Frame", {
+			Size = UDim2.fromOffset(TRACK_W, TRACK_H),
+			Position = UDim2.new(1, -(TRACK_W + 14), 0.5, -TRACK_H / 2),
+			BackgroundColor3 = init and C_ACCENT or C_TOGGLE_OFF,
+			BorderSizePixel = 0,
+			Parent = row,
+		}, {corner(12)})
+		local thumb = create("Frame", {
+			Size = UDim2.fromOffset(THUMB, THUMB),
+			Position = init and UDim2.fromOffset(TRACK_W - THUMB - 3, 3) or UDim2.fromOffset(3, 3),
+			BackgroundColor3 = Color3.fromRGB(240, 242, 255),
+			BorderSizePixel = 0,
+			Parent = track,
+		}, {corner(9)})
+
+		local state = init
+		local control = {}
+		local function apply()
+			tween(track, 0.12, {BackgroundColor3 = state and C_ACCENT or C_TOGGLE_OFF}, Enum.EasingStyle.Quad)
+			tween(thumb, 0.12, {Position = state and UDim2.fromOffset(TRACK_W - THUMB - 3, 3) or UDim2.fromOffset(3, 3)}, Enum.EasingStyle.Quad)
+		end
+		function control.Set(v)
+			state = v
+			apply()
+		end
+		function control.Get()
+			return state
+		end
+
+		clicker.MouseButton1Click:Connect(function()
+			state = not state
+			apply()
+			toast(text .. (state and "  :  ON" or "  :  OFF"), state and C_ACTIVE or C_SUBTXT)
+			if onChange then
+				task.spawn(onChange, state)
+			end
+		end)
+		return control
+	end
+
+	local function action(page, text, onClick, color)
+		local row, clicker = newRow(page, 44, true)
+		label({
+			Name = "Main",
+			Size = UDim2.new(1, -50, 1, 0),
+			Position = UDim2.fromOffset(14, 0),
+			Text = text,
+			TextColor3 = color or C_TXT,
+			Parent = row,
+		})
+		label({
+			Name = "Arrow",
+			Size = UDim2.fromOffset(30, 30),
+			Position = UDim2.new(1, -40, 0.5, -15),
+			Text = ">",
+			Font = Enum.Font.GothamBold,
+			TextSize = 16,
+			TextColor3 = C_SUBTXT,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Parent = row,
+		})
+		clicker.MouseButton1Click:Connect(function()
+			if onClick then
+				task.spawn(onClick)
+			end
+		end)
+		return row
+	end
+
+	local function cycle(page, text, values, initIdx, onChange)
+		local row, clicker = newRow(page, 44, true)
+		label({
+			Name = "Main",
+			Size = UDim2.new(0.5, 0, 1, 0),
+			Position = UDim2.fromOffset(14, 0),
+			Text = text,
+			Parent = row,
+		})
+		local pill = create("Frame", {
+			Size = UDim2.fromOffset(130, 30),
+			Position = UDim2.new(1, -144, 0.5, -15),
+			BackgroundColor3 = C_ROW,
+			BackgroundTransparency = 0.35,
+			BorderSizePixel = 0,
+			Parent = row,
+		}, {corner(6)})
+		label({
+			Name = "ChevL", Size = UDim2.fromOffset(22, 30), Position = UDim2.fromOffset(4, 0),
+			Text = "<", Font = Enum.Font.GothamBold, TextColor3 = C_SUBTXT,
+			TextXAlignment = Enum.TextXAlignment.Center, Parent = pill,
+		})
+		local valLbl = label({
+			Name = "Value", Size = UDim2.new(1, -44, 1, 0), Position = UDim2.fromOffset(22, 0),
+			Text = values[initIdx], Font = Enum.Font.GothamBold,
+			TextXAlignment = Enum.TextXAlignment.Center, Parent = pill,
+		})
+		label({
+			Name = "ChevR", Size = UDim2.fromOffset(22, 30), Position = UDim2.new(1, -26, 0, 0),
+			Text = ">", Font = Enum.Font.GothamBold, TextColor3 = C_SUBTXT,
+			TextXAlignment = Enum.TextXAlignment.Center, Parent = pill,
+		})
+
+		local idx = initIdx
+		clicker.MouseButton1Click:Connect(function()
+			idx = (idx % #values) + 1
+			scramble(valLbl, values[idx], 0.2)
+			finalText[valLbl] = values[idx]
+			toast(text .. "  :  " .. values[idx])
+			if onChange then
+				task.spawn(onChange, values[idx])
+			end
+		end)
+		return {Get = function() return values[idx] end}
+	end
+
+	local function slider(page, text, minV, maxV, initV, step, fmt, onChange)
+		local row = newRow(page, 60, false)
+		local pad = create("UIPadding", {PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14), Parent = row})
+
+		local nameLbl = label({
+			Name = "Main", Size = UDim2.new(0.65, 0, 0, 26), Position = UDim2.fromOffset(0, 6),
+			Text = text, Parent = row,
+		})
+		local valLbl = label({
+			Name = "Value", Size = UDim2.new(0.35, 0, 0, 26), Position = UDim2.fromScale(0.65, 0),
+			Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Right,
+			Text = "", Parent = row,
+		})
+		valLbl.Position = UDim2.new(0.65, 0, 0, 6)
+
+		local track = create("Frame", {
+			Size = UDim2.new(1, 0, 0, 8),
+			Position = UDim2.fromOffset(0, 40),
+			BackgroundColor3 = Color3.fromRGB(55, 60, 78),
+			BorderSizePixel = 0,
+			Parent = row,
+		}, {corner(4)})
+		local fill = create("Frame", {BackgroundColor3 = C_ACCENT, BorderSizePixel = 0, Parent = track}, {corner(4)})
+		local hit = create("TextButton", {
+			Size = UDim2.new(1, 0, 0, 26), Position = UDim2.new(0, 0, 0.5, -13),
+			BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 3, Parent = track,
+		})
+
+		local value = initV
+		local function setVal(v, silent)
+			v = math.clamp(v, minV, maxV)
+			v = math.floor(v / step + 0.5) * step
+			value = v
+			fill.Size = UDim2.fromScale((v - minV) / (maxV - minV), 1)
+			setText(valLbl, fmt and string.format(fmt, v) or tostring(math.floor(v)))
+			if not silent and onChange then
+				onChange(v)
+			end
+		end
+		setVal(initV, true)
+
+		local dragging = false
+		local function fromX(x)
+			local t = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+			setVal(minV + t * (maxV - minV))
+		end
+		hit.InputBegan:Connect(function(input)
+			if isClick(input) then
+				dragging = true
+				fromX(input.Position.X)
+			end
+		end)
+		bind(UserInputService.InputChanged, function(input)
+			local t = input.UserInputType
+			if dragging and (t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch) then
+				fromX(input.Position.X)
+			end
+		end)
+		bind(UserInputService.InputEnded, function(input)
+			if isClick(input) then
+				dragging = false
+			end
+		end)
+		return {Get = function() return value end, Set = function(v) setVal(v, true) end}
+	end
+
+	local function statRow(page, text, initial)
+		local row = newRow(page, 44, false)
+		label({Name = "Main", Size = UDim2.new(0.6, 0, 1, 0), Position = UDim2.fromOffset(14, 0), Text = text, Parent = row})
+		return label({
+			Name = "Value", Size = UDim2.new(0.35, 0, 1, 0), Position = UDim2.new(0.65, -14, 0, 0),
+			Text = initial, Font = Enum.Font.GothamBold, TextColor3 = C_ACCENT,
+			TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
+		})
+	end
+
+	-- =====================================================================================
+	--  CONTENU DES ONGLETS : chaque bouton appelle la logique via Bridge.*
+	-- =====================================================================================
+	local burnToggleCallback -- défini plus bas
+	local requestStop        -- défini plus bas
+	local farmCtl, noclipCtl -- gardés pour pouvoir les remettre sur OFF (arrêt de sécurité)
+
+	do -- Farm
+		local p = newPage("Farm")
+		header(p, "Farm")
+		farmCtl = toggle(p, "Auto Farm", "Automatically collect coins", false, function(v)
+			State.autoFarm = v
+			Bridge.setAutoFarm(v)
+		end)
+		noclipCtl = toggle(p, "Noclip", "Disables world collisions", false, function(v)
+			State.noclip = v
+			Bridge.setNoclip(v)
+		end)
+		toggle(p, "Auto Reset (Full Bag)", "Auto reset when bag is full", false, function(v)
+			State.autoReset = v
+			Bridge.setAutoReset(v)
+		end)
+		header(p, "Movement Mode")
+		cycle(p, "Mode", {"Pathfinding", "Walk", "Tween"}, 1, function(v)
+			State.moveMode = v
+			Bridge.setMoveMode(v)
+		end)
+	end
+
+	do -- Advanced
+		local p = newPage("Advanced")
+		header(p, "Behaviour")
+		toggle(p, "TP If Stuck", "Teleport to coin if player is stuck", false, function(v)
+			State.tpIfStuck = v
+			Bridge.setTpIfStuck(v)
+		end)
+		toggle(p, "Auto Walk If Idle", "Move randomly after idle period", false, function(v)
+			State.autoWalkIfIdle = v
+			Bridge.setAutoWalkIfIdle(v)
+		end)
+		toggle(p, "Auto Jump", "Auto jump when facing an obstacle", false, function(v)
+			State.autoJump = v
+			Bridge.setAutoJump(v)
+		end)
+		header(p, "Tween")
+		slider(p, "Tween Speed", 5, 50, State.tweenSpeed, 1, nil, function(v)
+			State.tweenSpeed = v
+			Bridge.setTweenSpeed(v)
+		end)
+		slider(p, "Delay (seconds)", 0, 2, State.postCollectDelay, 0.01, "%.2f", function(v)
+			State.postCollectDelay = v
+			Bridge.setPostCollectDelay(v)
+		end)
+		slider(p, "Tween Y Offset", -7, 7, State.tweenYOffset, 0.01, "%.2f", function(v)
+			State.tweenYOffset = v
+			Bridge.setTweenYOffset(v)
+		end)
+	end
+
+	do -- Security
+		local p = newPage("Security")
+		header(p, "Protections")
+		action(p, "Anti Screen Burn", function()
+			if burnToggleCallback then burnToggleCallback() end
+		end)
+		toggle(p, "Anti Unknown Player", "Kills if an unknown player joins/leaves", false, function(v)
+			State.antiUnknownPlayer = v
+			Bridge.setAntiUnknown(v)
+		end)
+		toggle(p, "Blacklisted Players", "Kills if a blacklisted player joins", true, function(v)
+			State.blacklistedPlayers = v
+			Bridge.setBlacklisted(v)
+		end)
+		toggle(p, "Anti Fling", "Disables other players' collisions", true, function(v)
+			State.antiFling = v
+			Bridge.setAntiFling(v)
+		end)
+	end
+
+	do -- Player
+		local p = newPage("Player")
+		header(p, "Player")
+		note(p, "Coming soon...")
+	end
+
+	local deathValue, uptimeValue
+	do -- Stats
+		local p = newPage("Stats")
+		header(p, "Statistics")
+		deathValue = statRow(p, "Deaths", "0")
+		uptimeValue = statRow(p, "Uptime", "00:00:00")
+		header(p, "Script")
+		action(p, "Stop the script", function()
+			if requestStop then requestStop() end
+		end, C_DANGER)
+	end
+
+	-- Arrêt de sécurité déclenché par la logique (joueur blacklisté / inconnu)
+	Bridge.onSecurity = function(reason)
+		State.autoFarm = false
+		State.noclip = false
+		if farmCtl then farmCtl.Set(false) end
+		if noclipCtl then noclipCtl.Set(false) end
+		toast("SECURITY : " .. tostring(reason), C_DANGER)
+	end
+
+	-- ================= DIALOGUE DE CONFIRMATION =================
+	local Overlay = create("Frame", {
+		Name = "ConfirmOverlay",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+		BackgroundTransparency = 0.55,
+		BorderSizePixel = 0,
+		Visible = false,
+		Active = true,
+		ZIndex = 20,
+		Parent = Window,
+	}, {corner(12)})
+
+	local Dialog = create("Frame", {
+		Size = UDim2.fromOffset(280, 130),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+		ZIndex = 21,
+		Parent = Overlay,
+	}, {corner(3), stroke(C_STROKE, 0, 1)})
+
+	label({
+		Name = "Question",
+		Size = UDim2.new(1, -20, 0, 50),
+		Position = UDim2.fromOffset(10, 10),
+		Text = "Stop the script?",
+		Font = Enum.Font.GothamBold,
+		TextSize = 20,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		ZIndex = 22,
+		Parent = Dialog,
+	})
+
+	local function dialogBtn(x, txt, base, hov)
+		local b = create("TextButton", {
+			Size = UDim2.fromOffset(118, 36),
+			Position = UDim2.fromOffset(x, 82),
+			Text = "",
+			BackgroundColor3 = base,
+			BorderSizePixel = 0,
+			AutoButtonColor = false,
+			ZIndex = 22,
+			Parent = Dialog,
+		}, {corner(8)})
+		label({
+			Name = "Label", Size = UDim2.fromScale(1, 1), Text = txt, Font = Enum.Font.GothamBold,
+			TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 23, Parent = b,
+		})
+		b.MouseEnter:Connect(function() tween(b, 0.12, {BackgroundColor3 = hov}, Enum.EasingStyle.Quad) end)
+		b.MouseLeave:Connect(function() tween(b, 0.12, {BackgroundColor3 = base}, Enum.EasingStyle.Quad) end)
+		pressFx(b)
+		return b
+	end
+
+	local YesBtn = dialogBtn(12, "Yes", Color3.fromRGB(185, 0, 0), Color3.fromRGB(255, 0, 0))
+	local NoBtn = dialogBtn(148, "No", Color3.fromRGB(50, 177, 0), Color3.fromRGB(123, 255, 0))
+
+	NoBtn.MouseButton1Click:Connect(function()
+		Overlay.Visible = false
+	end)
+
+	requestStop = function()
+		Overlay.Visible = true
+		scrambleContainer(Dialog)
+	end
+
+	-- ================= MINI BOUTON (quand on ferme avec X) =================
+	local TinyToggle = create("TextButton", {
+		Name = "TinyToggle",
+		Size = UDim2.fromOffset(110, 32),
+		Position = UDim2.fromScale(0.01, 0.055),
+		BackgroundColor3 = Color3.fromRGB(8, 8, 8),
+		BackgroundTransparency = 0.6,
+		Text = "",
+		AutoButtonColor = false,
+		Visible = false,
+		ZIndex = 3,
+		Parent = ScreenGui,
+	}, {corner(5), stroke(C_STROKE, 0, 1)})
+	local TinyLabel = label({
+		Name = "Label", Size = UDim2.fromScale(1, 1), Text = "▶  " .. CONFIG.title,
+		TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 4, Parent = TinyToggle,
+	})
+	TinyToggle.MouseEnter:Connect(function() tween(TinyToggle, 0.12, {BackgroundColor3 = Color3.fromRGB(18, 18, 18)}, Enum.EasingStyle.Quad) end)
+	TinyToggle.MouseLeave:Connect(function() tween(TinyToggle, 0.12, {BackgroundColor3 = Color3.fromRGB(8, 8, 8)}, Enum.EasingStyle.Quad) end)
+	pressFx(TinyToggle)
+
+	-- ================= AURA ASCII =================
+	local asciiCfg = CONFIG.ascii
+	local ascii = {}
+	do
+		local font = Enum.Font.Code
+		local huge = Vector2.new(1e5, 1e5)
+		local size = asciiCfg.textSize
+
+		local cw = TextService:GetTextSize(string.rep("M", 40), size, font, huge).X / 40
+		local h1 = TextService:GetTextSize("M", size, font, huge).Y
+		local h11 = TextService:GetTextSize(string.rep("M\n", 10) .. "M", size, font, huge).Y
+		local ch = (h11 - h1) / 10
+		if cw <= 0 then cw = size * 0.6 end
+		if ch <= 0 then ch = size end
+
+		-- 3 labels empilés à transparences différentes
+		local layers = {
+			{min = 0.1, transparency = 0.84},
+			{min = 0.4, transparency = 0.62},
+			{min = 0.7, transparency = 0.3},
+		}
+
+		local labels = {}
+		for i in ipairs(layers) do
+			labels[i] = create("TextLabel", {
+				Name = "Layer" .. i,
+				BackgroundTransparency = 1,
+				Font = font,
+				TextSize = size,
+				TextColor3 = asciiCfg.color,
+				TextTransparency = 1,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextYAlignment = Enum.TextYAlignment.Top,
+				TextWrapped = false,
+				RichText = false,
+				Text = "",
+				ZIndex = 1,
+				Parent = AsciiHolder,
+			})
+		end
+
+		local ramp = {}
+		for i = 1, #asciiCfg.ramp do
+			ramp[i] = asciiCfg.ramp:sub(i, i)
+		end
+		local rampLen = #ramp
+
+		local cols, rows, offX, offY = 0, 0, 0, 0
+		local glow = {}
+		local bufs = {{}, {}, {}}
+		local lines = {{}, {}, {}}
+
+		function ascii.rebuild(area, inner)
+			cols = math.max(1, math.floor(area.X / cw))
+			rows = math.max(1, math.floor(area.Y / ch))
+			offX = (area.X - cols * cw) / 2
+			offY = (area.Y - rows * ch) / 2
+
+			for _, l in ipairs(labels) do
+				l.Position = UDim2.fromOffset(offX, offY)
+				l.Size = UDim2.fromOffset(cols * cw + 4, rows * ch + 4)
+			end
+
+			local cx, cy = area.X / 2, area.Y / 2
+			local hw, hh = inner.X / 2, inner.Y / 2
+			local pad = asciiCfg.padding
+			table.clear(glow)
+			for y = 0, rows - 1 do
+				local qy = math.max(math.abs(offY + (y + 0.5) * ch - cy) - hh, 0)
+				for x = 0, cols - 1 do
+					local qx = math.max(math.abs(offX + (x + 0.5) * cw - cx) - hw, 0)
+					local i = y * cols + x + 1
+					if qx == 0 and qy == 0 then
+						glow[i] = -1
+					else
+						local g = math.clamp(1 - math.sqrt(qx * qx + qy * qy) / pad, 0, 1)
+						glow[i] = g * g * (3 - 2 * g)
+					end
+				end
+			end
+			for _, b in ipairs(bufs) do
+				table.clear(b)
+			end
+		end
+
+		local noise, sin, cos, sqrt, exp, floor = math.noise, math.sin, math.cos, math.sqrt, math.exp, math.floor
+		local min1, min2, min3 = layers[1].min, layers[2].min, layers[3].min
+		local aspect = ch / cw
+
+		function ascii.render(t, alpha, mx, my)
+			local mcx, mcy
+			if mx then
+				mcx, mcy = (mx - offX) / cw, (my - offY) / ch
+			end
+			local b1, b2, b3 = bufs[1], bufs[2], bufs[3]
+			local l1, l2, l3 = lines[1], lines[2], lines[3]
+
+			for y = 0, rows - 1 do
+				local base = y * cols
+				local ny = y * 0.11 - t * 0.35
+				local wy = cos(y * 0.21 - t * 0.7)
+				for x = 0, cols - 1 do
+					local g = glow[base + x + 1]
+					local c1, c2, c3 = " ", " ", " "
+					if g and g > 0 then
+						local v = 0.45 + noise(x * 0.055, ny, t * 0.12) * 1.3 + sin(x * 0.12 + t * 1.1) * wy * 0.18
+						if mcx then
+							local dx, dy = x - mcx, (y - mcy) * aspect
+							local d = sqrt(dx * dx + dy * dy)
+							v += sin(d * 0.45 - t * 7) * exp(-d * 0.09) * 0.45
+						end
+						v *= g * alpha
+						if v >= min1 then
+							local idx = math.clamp(floor(v * rampLen) + 1, 2, rampLen)
+							local glyph = ramp[idx]
+							if v >= min3 then
+								c3 = glyph
+							elseif v >= min2 then
+								c2 = glyph
+							else
+								c1 = glyph
+							end
+						end
+					end
+					b1[x + 1], b2[x + 1], b3[x + 1] = c1, c2, c3
+				end
+				l1[y + 1] = table.concat(b1, "", 1, cols)
+				l2[y + 1] = table.concat(b2, "", 1, cols)
+				l3[y + 1] = table.concat(b3, "", 1, cols)
+			end
+
+			labels[1].Text = table.concat(l1, "\n", 1, rows)
+			labels[2].Text = table.concat(l2, "\n", 1, rows)
+			labels[3].Text = table.concat(l3, "\n", 1, rows)
+
+			for i, layer in ipairs(layers) do
+				labels[i].TextTransparency = 1 - (1 - layer.transparency) * alpha
+			end
+		end
+	end
+
+	local asciiAlpha = Instance.new("NumberValue")
+
+	do
+		local acc, lastArea = 0, nil
+		local start = os.clock()
+
+		bind(RunService.RenderStepped, function(dt)
+			AsciiHolder.Position = Window.Position
+			if not asciiCfg.enabled then
+				return
+			end
+
+			local alpha = asciiAlpha.Value
+			if alpha <= 0.001 then
+				return
+			end
+
+			acc += dt
+			if acc < 1 / asciiCfg.fps then
+				return
+			end
+			acc = 0
+
+			local s = MainScale.Scale > 0 and MainScale.Scale or 1
+			local abs = Window.AbsoluteSize
+			local inner = Vector2.new(math.floor(abs.X / s + 0.5), math.floor(abs.Y / s + 0.5))
+			local area = inner + Vector2.new(asciiCfg.padding * 2, asciiCfg.padding * 2)
+			if area ~= lastArea then
+				lastArea = area
+				AsciiHolder.Size = UDim2.fromOffset(area.X, area.Y)
+				ascii.rebuild(area, inner)
+			end
+
+			local mx, my
+			if asciiCfg.mouse then
+				local m = UserInputService:GetMouseLocation() - AsciiHolder.AbsolutePosition
+				if m.X >= 0 and m.Y >= 0 and m.X <= area.X and m.Y <= area.Y then
+					mx, my = m.X, m.Y
+				end
+			end
+
+			ascii.render(os.clock() - start, alpha, mx, my)
+		end)
+	end
+
+	-- ================= OUVERTURE / FERMETURE =================
+	local UI = {State = State, Config = CONFIG}
+	local isOpen, destroyed = false, false
+	local burnActive = false
+
+	local function introScramble()
+		scramble(TitleLabel, CONFIG.title, 0.6)
+		scramble(AuthorLabel, CONFIG.author, 0.6, 0.15)
+		for i, p in ipairs(pages) do
+			scramble(p.label, finalText[p.label], 0.4, 0.1 + i * 0.06)
+		end
+		scrambleContainer(pages[currentPage].frame)
+	end
+
+	local function open()
+		if isOpen or destroyed then
+			return
+		end
+		isOpen = true
+		Window.Visible = true
+		TinyToggle.Visible = false
+		AsciiHolder.Visible = asciiCfg.enabled
+
+		MainScale.Scale = 0.88
+		fade(Window, 0, 0)
+		tween(MainScale, 0.55, {Scale = 1}, Enum.EasingStyle.Back)
+		fade(Window, 1, 0.35)
+		tween(asciiAlpha, 1, {Value = 1}, Enum.EasingStyle.Sine)
+		introScramble()
+	end
+
+	local function hide(callback)
+		if not isOpen then
+			if callback then callback() end
+			return
+		end
+		isOpen = false
+		tween(MainScale, 0.25, {Scale = 0.9}, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+		fade(Window, 0, 0.22)
+		tween(asciiAlpha, 0.35, {Value = 0}, Enum.EasingStyle.Quad)
+		task.delay(0.36, function()
+			if not isOpen then
+				Window.Visible = false
+				AsciiHolder.Visible = false
+			end
+			if callback then callback() end
+		end)
+	end
+
+	function UI.Toggle()
+		if destroyed or burnActive then
+			return
+		end
+		if isOpen then
+			hide()
+		else
+			open()
+		end
+	end
+
+	function UI.Destroy(instant)
+		if destroyed then
+			return
+		end
+		destroyed = true
+		-- on coupe d'abord toute la logique (farm, noclip, plateforme tween, anti-fling...)
+		pcall(Bridge.shutdown)
+		local function finish()
+			for _, c in ipairs(connections) do
+				c:Disconnect()
+			end
+			asciiAlpha:Destroy()
+			ScreenGui:Destroy()
+			BurnGui:Destroy()
+			if env.__ACNS_TemplateUI == UI then
+				env.__ACNS_TemplateUI = nil
+			end
+		end
+		if instant then
+			finish()
+		else
+			hide(finish)
+		end
+	end
+
+	YesBtn.MouseButton1Click:Connect(function()
+		Overlay.Visible = false
+		UI.Destroy()
+	end)
+
+	-- Fermer (X) -> mini bouton ; "-" -> réduire à la barre de titre
+	CloseBtn.MouseButton1Click:Connect(function()
+		hide()
+		TinyToggle.Visible = true
+		scramble(TinyLabel, finalText[TinyLabel], 0.4, 0.2)
+	end)
+
+	local minimized = false
+	MinBtn.MouseButton1Click:Connect(function()
+		minimized = not minimized
+		Sidebar.Visible = not minimized
+		Panel.Visible = not minimized
+		TitleSep.Visible = not minimized
+		SideSep.Visible = not minimized
+		MinBtn.Text = minimized and "+" or "-"
+		tween(Window, 0.2, {Size = minimized and UDim2.fromOffset(WIN_W, TITLE_H) or UDim2.fromOffset(WIN_W, WIN_H)}, Enum.EasingStyle.Quad)
+		if not minimized then
+			scrambleContainer(pages[currentPage].frame)
+		end
+	end)
+
+	-- Drag de la fenêtre
+	do
+		local dragging, dragStart, startPos
+		TitleBar.InputBegan:Connect(function(input)
+			if not isClick(input) then return end
+			dragging, dragStart, startPos = true, input.Position, Window.Position
+			local c
+			c = input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+					c:Disconnect()
+				end
+			end)
+		end)
+		bind(UserInputService.InputChanged, function(input)
+			if not dragging then return end
+			local t = input.UserInputType
+			if t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch then
+				local d = input.Position - dragStart
+				Window.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+			end
+		end)
+	end
+
+	-- Drag du mini bouton (le clic ne compte pas si on a déplacé)
+	do
+		local dragging, moved, dragStart, startPos = false, false, nil, nil
+		TinyToggle.InputBegan:Connect(function(input)
+			if not isClick(input) then return end
+			dragging, moved, dragStart, startPos = true, false, input.Position, TinyToggle.Position
+			local c
+			c = input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+					c:Disconnect()
+				end
+			end)
+		end)
+		bind(UserInputService.InputChanged, function(input)
+			if not dragging then return end
+			local t = input.UserInputType
+			if t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch then
+				local d = input.Position - dragStart
+				if d.Magnitude > 5 then moved = true end
+				TinyToggle.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+			end
+		end)
+		TinyToggle.MouseButton1Click:Connect(function()
+			if not moved then
+				open()
+			end
+		end)
+	end
+
+	bind(UserInputService.InputBegan, function(input, gpe)
+		if not gpe and input.KeyCode == CONFIG.toggleKey then
+			UI.Toggle()
+		end
+	end)
+
+	-- ================= ANTI SCREEN BURN (écran noir, 5 clics pour revenir) =================
+	do
+		local overlay = create("Frame", {
+			Name = "BurnOverlay",
+			Size = UDim2.fromScale(1, 1),
+			BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+			BorderSizePixel = 0,
+			Visible = false,
+			Active = true,
+			Parent = BurnGui,
+		})
+		label({
+			Size = UDim2.new(1, 0, 0, 26), Position = UDim2.new(0, 0, 1, -34),
+			Text = "Tap 5x to disable anti screen burn", Font = Enum.Font.Gotham,
+			TextColor3 = Color3.fromRGB(28, 28, 28), TextXAlignment = Enum.TextXAlignment.Center, Parent = overlay,
+		})
+
+		local clicks = 0
+		local function deactivate()
+			burnActive = false
+			overlay.Visible = false
+			clicks = 0
+			open()
+		end
+		local function activate()
+			burnActive = true
+			clicks = 0
+			hide()
+			TinyToggle.Visible = false
+			overlay.Visible = true
+		end
+		overlay.InputBegan:Connect(function(input)
+			if isClick(input) then
+				clicks += 1
+				if clicks >= 5 then deactivate() end
+			end
+		end)
+		burnToggleCallback = function()
+			if burnActive then deactivate() else activate() end
+		end
+	end
+
+	-- ================= STATS (morts + uptime) =================
+	do
+		local startTime = os.clock()
+		task.spawn(function()
+			while not destroyed do
+				local e = math.floor(os.clock() - startTime)
+				setText(deathValue, tostring(Bridge.getDeaths()), true)
+				setText(uptimeValue, string.format("%02d:%02d:%02d", math.floor(e / 3600), math.floor((e % 3600) / 60), e % 60), true)
+				task.wait(1)
+			end
+		end)
+	end
+
+	-- ================= DÉMARRAGE =================
+	showPage(1, true)
+	env.__ACNS_TemplateUI = UI
+	open()
+end -- fin du bloc interface
