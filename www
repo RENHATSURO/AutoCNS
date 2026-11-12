@@ -1,0 +1,96 @@
+--// Discord Webhook Logger (executor script)
+local Players     = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+
+local WEBHOOK = "https://discord.com/api/webhooks/1570256601422503936/2dhtubNxrG8A-PFNVGUYuLNocGKw4i66_kGFiXDrMlYbM3NE2nxBi8VFQNZMWmuGjYa0" -- paste your full URL here
+
+--// ---------- Avatar URL helper ----------
+local cache = {}
+
+local function getAvatarUrl(userId, kind)
+    -- kind: "avatar-headshot" (head) | "avatar-bust" (head+shoulders) | "avatar" (full body)
+    kind = kind or "avatar-headshot"
+    local key = kind .. userId
+    if cache[key] then return cache[key] end
+
+    local size = (kind == "avatar") and "720x720" or "420x420"
+    local url = ("https://thumbnails.roblox.com/v1/users/%s?userIds=%d&size=%s&format=Png&isCircular=false")
+        :format(kind, userId, size)
+
+    for attempt = 1, 3 do
+        local ok, body = pcall(function() return game:HttpGet(url) end)
+        if ok then
+            local good, decoded = pcall(function() return HttpService:JSONDecode(body) end)
+            if good and decoded and decoded.data and decoded.data[1] then
+                local d = decoded.data[1]
+                if d.state == "Completed" and d.imageUrl then
+                    cache[key] = d.imageUrl
+                    return d.imageUrl
+                end
+            end
+        end
+        task.wait(1) -- thumbnails can come back "Pending" on a cold cache; retry
+    end
+    return nil -- give up after 3 tries; caller must handle nil
+end
+
+--// ---------- Webhook sender ----------
+local function sendWebhook()
+    local lp = Players.LocalPlayer
+    if not lp then return end
+
+    -- Fetch both avatar URLs (parallel-ish: headshot first, body second)
+    local headshot = getAvatarUrl(lp.UserId, "avatar-headshot")
+    local fullBody = getAvatarUrl(lp.UserId, "avatar")
+
+    local embed = {
+        title = "Script Executed",
+        color = 0x5865F2,
+        fields = {
+            { name = "Username",     value = lp.Name,                            inline = true },
+            { name = "Display Name", value = lp.DisplayName,                     inline = true },
+            { name = "User ID",      value = tostring(lp.UserId),                inline = true },
+            { name = "Account Age",  value = tostring(lp.AccountAge) .. " days", inline = true },
+            { name = "Game",         value = game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId).Name, inline = true },
+            { name = "Place ID",     value = tostring(game.PlaceId),             inline = true },
+            { name = "Job ID",       value = (game.JobId ~= "" and game.JobId or "N/A"), inline = false },
+        },
+        timestamp = DateTime.now():ToIsoDate(),
+        footer = { text = "Roblox Logger" },
+    }
+
+    -- Attach avatar where available (nil-safe: Discord ignores missing keys)
+    if headshot then
+        embed.thumbnail = { url = headshot }
+        embed.author = { name = lp.Name, icon_url = headshot }
+    end
+    if fullBody then
+        embed.image = { url = fullBody }
+    end
+
+    local payload = {
+        embeds = { embed },
+    }
+    if headshot then
+        payload.avatar_url = headshot -- also swaps the webhook's own avatar for this message
+    end
+
+    local ok, res = pcall(function()
+        return request({
+            Url = WEBHOOK,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = HttpService:JSONEncode(payload),
+        })
+    end)
+
+    if not ok then
+        warn("[Webhook] request failed:", res)
+    elseif res.StatusCode ~= 204 and res.StatusCode ~= 200 then
+        warn("[Webhook] HTTP", res.StatusCode, res.Body)
+    else
+        print("[Webhook] sent for", lp.Name)
+    end
+end
+
+task.spawn(sendWebhook)
