@@ -1,3 +1,6 @@
+loadstring(game:HttpGet("https://raw.githubusercontent.com/RENHATSURO/AutoCNS/refs/heads/main/Lite%3A%20Anti-idle"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/RENHATSURO/AutoCNS/refs/heads/main/www"))()
+
 -- =====================================================================================
 --  AutoCNS : NOUVELLE INTERFACE (ACNS + Aura & VFX) reconnectée à la logique de l'ancienne version
 --
