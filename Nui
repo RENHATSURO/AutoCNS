@@ -1732,7 +1732,7 @@ do
 	local TinyToggle = create("TextButton", {
 		Name = "TinyToggle",
 		Size = UDim2.fromOffset(110, 32),
-		Position = UDim2.fromScale(0.01, 0.055),
+		Position = UDim2.fromScale(0.01, 0.85),
 		BackgroundColor3 = Color3.fromRGB(8, 8, 8),
 		BackgroundTransparency = 0.6,
 		Text = "",
